@@ -1,0 +1,64 @@
+{
+  "format": "MessGraph-Definition",
+  "version": 1,
+  "title": "Beispiel: Fourier-Analyse",
+  "comment": "Spektren und Harmonische zu den Fourier-Demodaten.",
+  "author": "MessGraph",
+  "created": "2026-11-20 12:28:57",
+  "files": [
+    {
+      "path": "demo_fourier_netz_oberschwingungen.csv",
+      "relpath": "demo_fourier_netz_oberschwingungen.csv",
+      "computed": [
+        {
+          "name": "Harmonische I_L1",
+          "unit": "",
+          "formula": "FFT({I_L1}; h=1..15; f0=auto; win=auto)",
+          "comment": "Gleichrichterstrom: ungerade Harmonische 3, 5, 7 ..."
+        },
+        {
+          "name": "Harmonische U_L1",
+          "unit": "",
+          "formula": "FFT({U_L1}; h=1..15; f0=50; win=auto)",
+          "comment": "Netzspannung, f0 fest 50 Hz"
+        },
+        {
+          "name": "Spektrum I_L1",
+          "unit": "",
+          "formula": "FFT({I_L1}; f=0..1000; win=auto)",
+          "comment": "Frequenzbereich 0..1000 Hz"
+        }
+      ]
+    },
+    {
+      "path": "demo_fourier_rechteck_saegezahn.csv",
+      "relpath": "demo_fourier_rechteck_saegezahn.csv",
+      "computed": [
+        {
+          "name": "Harmonische Rechteck",
+          "unit": "",
+          "formula": "FFT({Rechteck}; h=1..15; f0=auto; win=auto)",
+          "comment": "nur ungerade, 1/n"
+        },
+        {
+          "name": "Harmonische Saegezahn",
+          "unit": "",
+          "formula": "FFT({Saegezahn}; h=1..15; f0=auto; win=auto)",
+          "comment": "alle, 1/n"
+        }
+      ]
+    },
+    {
+      "path": "demo_fourier_frequenzrampe.csv",
+      "relpath": "demo_fourier_frequenzrampe.csv",
+      "computed": [
+        {
+          "name": "Harmonische Phasenstrom",
+          "unit": "",
+          "formula": "FFT({Phasenstrom}; h=1..10; f0=auto; win=auto)",
+          "comment": "Periodendauer ändert sich - Tabelle je Periode im Tooltip"
+        }
+      ]
+    }
+  ]
+}

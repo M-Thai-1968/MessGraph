@@ -1,0 +1,11 @@
+# Limiter-Konfiguration (MessGraph): nur der obere Anteil des Rechtecksignals
+limiter:
+  format: messgraph_limiter
+  version: 1
+  active: true
+  rules:
+  - file: demo_rechteck.csv
+    signal: Rechteck
+    min: 4.5
+    max: null
+    enabled: true

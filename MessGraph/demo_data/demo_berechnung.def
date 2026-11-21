@@ -1,0 +1,28 @@
+{
+  "format": "MessGraph-Definition",
+  "version": 1,
+  "title": "Beispiel: Leistung und Widerstand",
+  "comment": "Gilt für alle Prüfläufe gleicher Struktur.",
+  "author": "MessGraph",
+  "created": "2026-11-08 12:11:38",
+  "files": [
+    {
+      "path": "demo_lauf_1.csv",
+      "relpath": "demo_lauf_1.csv",
+      "computed": [
+        {
+          "name": "Leistung",
+          "unit": "kW",
+          "formula": "{Strom} * {Spannung} / 1000",
+          "comment": "elektrische Leistung"
+        },
+        {
+          "name": "Widerstand",
+          "unit": "Ohm",
+          "formula": "{Spannung} / {Strom}",
+          "comment": "Lastwiderstand"
+        }
+      ]
+    }
+  ]
+}

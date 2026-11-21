@@ -1,0 +1,27 @@
+# Beispiel: Grenzen und Zielabstand je Mode für demo_pruefstand.asc (Aufbau wie eine Prüfstands-config.yaml)
+limits:
+  enabled: true
+  upper: null
+  lower: null
+  modes:
+    Interface:
+      steps: null
+    EU_AC_3ph_11kW_800V:
+      steps: 600          # Zahl ohne Einheit: Schritte (Messpunkte) bis zur Grenzverletzung
+      signals:
+        AC_V_L1: {enabled: true, lower: 207.0, upper: 253.0}
+        AC_V_L2: {enabled: true, lower: 207.0, upper: 253.0}
+        AC_V_L3: {enabled: true, lower: 207.0, upper: 253.0}
+        HVDC_V: {enabled: true, lower: 780.0, upper: 830.0}
+        LVDC_V: {enabled: true, lower: 13.0, upper: 14.5}
+        DUT_TS_01: {enabled: true, lower: 0.0, upper: 80.0}
+        DUT_TS_02: {enabled: true, lower: 0.0, upper: 80.0}
+        Clnt_OUT_T: {enabled: true, lower: 0.0, upper: 75.0}
+        Chiller_T: {enabled: false, lower: 0.0, upper: 0.0}
+        Signal_nicht_in_Datei: {enabled: true, lower: 0.0, upper: 1.0}
+    EU_AC_3ph_22kW_800V:
+      steps: 2h 30m       # mit Einheiten: Zeit bis zur Grenzverletzung
+      signals:
+        AC_V_L1: {enabled: true, lower: 220.0, upper: 240.0}
+        HVDC_V: {enabled: true, lower: 800.0, upper: 815.0}
+        DUT_TS_01: {enabled: true, lower: 0.0, upper: 90.0}
