@@ -6864,8 +6864,13 @@ class App:
         data = self.auto_settings.to_dict()
         data.update(source=job["source"], target=job["target"], mode=job.get("mode", ""), json_name=self._auto_json_path(job),
                     folders=list(job.get("folders") or []), exclude=list(job.get("exclude") or []),
-                    files=list(job.get("files") or []),
-                    edge_target=job.get("target_edges") if job.get("goal_kind") == "edges" else None)
+                    files=list(job.get("files") or []))
+        kind = job.get("goal_kind") or "time"
+        ev = self._auto_eval_get(job.get("evaluation") or "") if job.get("evaluation") else None
+        data.update(edge_count=kind == "edges", no_eval=kind == "ignore",
+                    edges=list(((ev or {}).get("mode_edges") or {}).get(self._auto_mode_name(job), []))
+                    if kind == "edges" else [],
+                    edge_target=job.get("target_edges") if kind == "edges" else None)
         return auto.AutoSettings.from_dict(data)
 
     AUTO_JSON_DEFAULT = "Time_counter.json"
@@ -6885,23 +6890,25 @@ class App:
         """Ergebnisdatei (alle) = Zielverzeichnis\\<Dateiname> (Standard Time_counter.json, z. B. HTOE_time_counter.json).
         Alle Teile mit demselben Zielverzeichnis schreiben in dieselbe Datei. Ein voller Pfad (ältere Einstellung)
         gilt weiter für alle Auswertungen."""
-        name = self._auto_json_effective(self.auto_settings.json_name)
+        name = (self.auto_settings.json_name or "").strip() or self.AUTO_JSON_DEFAULT
+        if job is not None and job.get("goal_kind") == "edges":     # Flanken: eigene Ergebnisdatei
+            name = self._edge_json_name(name)
         if os.path.isabs(os.path.expanduser(name)):
             return os.path.expanduser(name)
         folder = self._auto_target_dir(job)
         return os.path.join(folder, name) if folder else name
 
-    def _auto_json_default_name(self) -> str:
-        """Standardname: Time_counter.json, im Flanken Counter Flanken_counter.json."""
-        return auto.EDGE_JSON if self.auto_settings.edge_count else self.AUTO_JSON_DEFAULT
-
-    def _auto_json_effective(self, name: str | None) -> str:
-        """Gilt ein Standardname, folgt er der Zählerart (Time_counter.json <-> Flanken_counter.json); eigene Namen
-        bleiben."""
-        name = (name or "").strip() or self._auto_json_default_name()
-        if name in (self.AUTO_JSON_DEFAULT, auto.EDGE_JSON):
-            return self._auto_json_default_name()
-        return name
+    @staticmethod
+    def _edge_json_name(name: str) -> str:
+        """Ergebnisdatei der Modes mit Zähler Flanke neben der Zeit-Datei: Time_counter.json -> Flanken_counter.json,
+        HTOE_time_counter.json -> HTOE_Flanken_counter.json, andere Namen -> <Name>_Flanken.json."""
+        folder, base = os.path.split(name)
+        if re.search(r"time_counter", base, flags=re.IGNORECASE):
+            base = re.sub(r"time_counter", "Flanken_counter", base, flags=re.IGNORECASE)
+        else:
+            stem, ext = os.path.splitext(base)
+            base = f"{stem}_Flanken{ext or '.json'}"
+        return os.path.join(folder, base) if folder else base
 
     def _auto_json_paths(self) -> list[str]:
         """Alle Ergebnisdateien (je Zielverzeichnis eine), Reihenfolge der Auswertungen."""
@@ -6927,19 +6934,19 @@ class App:
         if getattr(self, "auto_json_where", None) and dpg.does_item_exist(self.auto_json_where):
             dpg.set_value(self.auto_json_where, "= " + "\n= ".join(self._auto_json_paths()))
 
-    # ---- Flanken Counter (statt Time Counter): Flanken je Signal über ein Werteband
+    # ---- Flanken je Mode (Zähler "Flanke" in Schritt 2): Signale über ein Werteband
     EDGE_FIELDS = ("signal", "upper", "lower", "n", "target")
 
-    def _auto_edges(self) -> list:
-        """Flankendefinitionen (bearbeitbar, in den Einstellungen gespeichert)."""
-        edges = self.auto_settings.edges
-        if not isinstance(edges, list):
-            edges = [dict(e) for e in edges]
-            self.auto_settings.edges = edges
-        return edges
+    def _auto_edges(self, mode: str | None = None) -> list:
+        """Flankendefinitionen eines Modes (in der Auswertung gespeichert, bearbeitbar)."""
+        ev = self._auto_eval()
+        mode = mode if mode is not None else getattr(self, "auto_edges_mode", "")
+        if ev is None or not mode:
+            return []
+        return ev.setdefault("mode_edges", {}).setdefault(mode, [])
 
-    def _auto_edges_valid(self) -> list:
-        return [e for e in (auto.normalize_edge(x) for x in self._auto_edges())
+    def _auto_edges_valid(self, mode: str | None = None) -> list:
+        return [e for e in (auto.normalize_edge(x) for x in self._auto_edges(mode))
                 if e is not None and (e["upper"] is not None or e["lower"] is not None)]
 
     @staticmethod
@@ -6951,50 +6958,29 @@ class App:
             parts.append(f"< {fmt(edge['lower'])}")
         return f"{edge['signal']} ({' / '.join(parts)}, n = {edge['n']})"
 
-    def _auto_edges_summary(self) -> str:
-        valid = self._auto_edges_valid()
+    def _auto_edges_summary(self, mode: str | None = None) -> str:
+        valid = self._auto_edges_valid(mode)
         if not valid:
             return t("keine Flanken festgelegt")
         return ", ".join(self._edge_text(e) for e in valid)
 
-    def _auto_counter_changed(self) -> None:
-        self._auto_read_form()
-        self._auto_counter_show()
-        self._auto_json_show()
-
-    def _auto_counter_show(self) -> None:
-        """Zählerart anzeigen: Knopf und Zusammenfassung der Flanken, Spaltenköpfe, Standardname der Ergebnisdatei."""
-        edge = bool(self.auto_settings.edge_count)
-        if getattr(self, "auto_edges_btn", None) and dpg.does_item_exist(self.auto_edges_btn):
-            dpg.configure_item(self.auto_edges_btn, show=edge)
-            dpg.configure_item(self.auto_edges_info, show=edge)
-            dpg.set_value(self.auto_edges_info, self._auto_edges_summary())
-        if getattr(self, "auto_hits", None) and dpg.does_item_exist(self.auto_hits):
-            dpg.configure_item(self.auto_hits, show=not edge)     # gilt nur für den Time Counter
-        cols = getattr(self, "auto_table_cols", [])
-        if len(cols) >= 7 and all(dpg.does_item_exist(c) for c in cols):
-            dpg.configure_item(cols[2], label=t("Signal") if edge else t("Mode"))
-            dpg.configure_item(cols[4], label=t("Flanken") if edge else t("Ist"))
-        if getattr(self, "auto_json", None) and dpg.does_item_exist(self.auto_json):
-            dpg.configure_item(self.auto_json, hint=self._auto_json_default_name())
-            if dpg.get_value(self.auto_json).strip() in (self.AUTO_JSON_DEFAULT, auto.EDGE_JSON):
-                dpg.set_value(self.auto_json, self._auto_json_default_name())
-        if dpg.does_item_exist("auto_run_window"):
-            dpg.configure_item("auto_run_window", label=t("Auto-Auswertung - Schritt 4: Zyklus starten") + "  -  " +
-                               (t("Flanken Counter") if edge else t("Time Counter")))
-
-    def _auto_signal_names(self) -> list[str]:
-        """Bekannte Signalnamen (Analyse in Schritt 3 und gelesene Gruppen) für die Auswahl im Flanken Counter."""
-        names = set(getattr(self, "auto_stats", {}) or {})
-        for engine in getattr(self, "auto_engines", {}).values():
+    def _auto_signal_names(self, mode: str | None = None) -> list[str]:
+        """Bekannte Signalnamen eines Modes (gelesene Gruppen seiner Teile), sonst aller Daten und der Analyse."""
+        names = set()
+        jobs = self._auto_eval_modes().get(mode, []) if mode else []
+        engines = [self.auto_engines[id(j)] for j in jobs if id(j) in getattr(self, "auto_engines", {})] if jobs \
+            else list(getattr(self, "auto_engines", {}).values())
+        for engine in engines:
             for group in engine.groups.values():
                 names.update(group.merged or {})
                 for data in group.files.values():
                     names.update(data.signals)
+        if not names:
+            names = set(getattr(self, "auto_stats", {}) or {})
         return sorted(names, key=str.casefold)
 
     def _build_auto_edges_window(self) -> None:
-        with dpg.window(tag="auto_edges_window", label=t("Flanken Counter - Flanken definieren"), show=False,
+        with dpg.window(tag="auto_edges_window", label=t("Flanken definieren"), show=False,
                         width=900, height=460, no_collapse=True):
             item = dpg.add_text(t("Eine Flanke über Wert1: Signal übersteigt Wert1, bleibt mindestens n Werte darüber und "
                                   "fällt danach für mindestens n Werte wieder darunter. Eine Flanke unter Wert2: Signal "
@@ -7014,7 +7000,10 @@ class App:
             self.auto_edges_state = dpg.add_text("", wrap=0)
             self._colour(self.auto_edges_state, "heading")
 
-    def open_auto_edges_window(self) -> None:
+    def open_auto_edges_window(self, mode: str) -> None:
+        """Flanken eines Modes festlegen (aus Modes und Zielzeiten, Zähler Flanke)."""
+        self.auto_edges_mode = mode
+        dpg.configure_item("auto_edges_window", label=t("Flanken definieren - Mode {mode}", mode=mode))
         self._auto_edges_fill()
         vw, vh = dpg.get_viewport_client_width(), dpg.get_viewport_client_height()
         dpg.configure_item("auto_edges_window", show=True, pos=[max(0, (vw - 900) // 2), max(0, (vh - 460) // 3)])
@@ -7024,7 +7013,7 @@ class App:
             return
         for row in dpg.get_item_children(self.auto_edges_table, 1) or []:
             dpg.delete_item(row)
-        names = self._auto_signal_names()
+        names = self._auto_signal_names(getattr(self, "auto_edges_mode", ""))
         self.auto_edge_rows = []
         for index, edge in enumerate(self._auto_edges()):
             with dpg.table_row(parent=self.auto_edges_table):
@@ -7051,8 +7040,24 @@ class App:
                 self.auto_edge_rows.append((cells, note))
         self._auto_edges_check()
 
+    def _auto_edge_problems_all(self) -> list:
+        """Über alle Auswertungen: verarbeitete Modes mit Zähler Flanke ohne gültige Flanke."""
+        out = []
+        current = getattr(self, "auto_eval_name", "")
+        for ev in getattr(self, "auto_evals", []):
+            modes = {}
+            for job in self._auto_eval_jobs(ev):
+                modes.setdefault(self._auto_mode_name(job), []).append(job)
+            for mode, jobs in modes.items():
+                if any(j.get("enabled", True) for j in jobs) and self._mode_goal(jobs)["kind"] == "edges":
+                    valid = [e for e in (auto.normalize_edge(x) for x in (ev.get("mode_edges") or {}).get(mode, []))
+                             if e is not None and (e["upper"] is not None or e["lower"] is not None)]
+                    if not valid:
+                        out.append(mode if ev["name"] == current else f"{ev['name']}/{mode}")
+        return out
+
     def _auto_edges_check(self) -> None:
-        """Hinweise je Zeile und Zusammenfassung."""
+        """Hinweise je Zeile und Zusammenfassung; die Zeile des Modes in Modes und Zielzeiten folgt."""
         for index, edge in enumerate(self._auto_edges()):
             if index >= len(getattr(self, "auto_edge_rows", [])):
                 break
@@ -7075,9 +7080,12 @@ class App:
                     problem = t("n: ganze Zahl ab 1")
             dpg.set_value(note, problem)
         if getattr(self, "auto_edges_state", None):
-            dpg.set_value(self.auto_edges_state, t("Flanken Counter: {text}", text=self._auto_edges_summary()))
-        if getattr(self, "auto_edges_info", None) and dpg.does_item_exist(self.auto_edges_info):
-            dpg.set_value(self.auto_edges_info, self._auto_edges_summary())
+            dpg.set_value(self.auto_edges_state, t("Flanken: {text}", text=self._auto_edges_summary()))
+        mode = getattr(self, "auto_edges_mode", "")
+        if mode:
+            self._auto_goal_notes(mode)
+            if dpg.does_item_exist(getattr(self, "auto_modes_text", 0) or 0):
+                dpg.set_value(self.auto_modes_text, self._auto_modes_summary())
 
     def _auto_edge_set(self, index: int, key: str, value) -> None:
         edges = self._auto_edges()
@@ -7096,7 +7104,10 @@ class App:
         if cells:
             dpg.set_value(cells[0], name)
 
-    def auto_add_edge(self, signal: str = "", upper=None, lower=None, n: int = 1, target=None) -> dict:
+    def auto_add_edge(self, signal: str = "", upper=None, lower=None, n: int = 1, target=None,
+                      mode: str | None = None) -> dict:
+        if mode is not None:
+            self.auto_edges_mode = mode
         edge = {"signal": signal, "upper": upper, "lower": lower, "n": n, "target": target}
         self._auto_edges().append(edge)
         self._auto_store()
@@ -7131,7 +7142,7 @@ class App:
         self._auto_load_jobs()
         job = self._auto_job()
         self.auto_items = {1: [], 2: [], 3: [], 4: []}      # Bedienelemente je Schritt (Sperren/Freigeben)
-        self.auto_step_state, self.auto_step_btn = {}, {}
+        self.auto_step_state, self.auto_step_btn, self.auto_step_reset = {}, {}, {}
 
         def reg(step: int, item):
             self.auto_items[step].append(item)
@@ -7153,6 +7164,11 @@ class App:
                     tip(self.auto_step_btn[step], "Schritt abschließen: Die Einstellungen dieses Schritts werden "
                         "geprüft und gesperrt, der nächste Schritt wird freigegeben. Gesperrte Schritte werden mit "
                         "Start (Durchlauf gestartet) oder Zurücksetzen wieder freigegeben.")
+                self.auto_step_reset[step] = dpg.add_button(label=t("Schritt zurücksetzen"), small=True,
+                                                            callback=lambda: self.auto_reset_step(step))
+                tip(self.auto_step_reset[step], "Diesen Schritt und alle folgenden zurücksetzen: sie sind wieder offen "
+                    "und müssen neu abgeschlossen werden (Schritt 1 = alle Schritte). Ein laufender Zyklus wird "
+                    "gestoppt. Einstellungen, Auswertungen und Ergebnisse bleiben erhalten.")
             item = dpg.add_text(t(text), wrap=0)
             self._colour(item, "text_dim")
 
@@ -7244,12 +7260,15 @@ class App:
 
             # ---- Schritt 2
             head(2, "Modes und Zielzeiten", "Modes und Zielzeiten... öffnet die Modes der Auswertung, nach ähnlichen Namen "
-                 "gruppiert: Häkchen = Mode verarbeiten, dahinter die Zielzeit (hh:mm:ss, gilt für alle DUTs des Modes). "
-                 "Nicht angehakte Modes brauchen keine Zielzeit.")
+                 "gruppiert: Häkchen = Mode verarbeiten, dahinter der Zähler (Zeit, Flanke oder Ignorieren) und das "
+                 "Ziel (gilt für alle DUTs des Modes). Die Zuordnung lässt sich jederzeit ändern und gilt sofort für "
+                 "die gewählten Daten.")
             with dpg.group(horizontal=True):
-                self.auto_modes_btn = reg(2, tip(dpg.add_button(label=t("Modes und Zielzeiten..."), width=230,
-                                                                callback=lambda: self.open_auto_modes()),
-                                                 "Liste der Modes öffnen: verarbeiten an/aus und Zielzeit hh:mm:ss je Mode."))
+                self.auto_modes_btn = tip(dpg.add_button(label=t("Modes und Zielzeiten..."), width=230,
+                                                         callback=lambda: self.open_auto_modes()),
+                                          "Liste der Modes öffnen: verarbeiten an/aus, Zähler (Zeit, Flanke, "
+                                          "Ignorieren) und Ziel je Mode. Jederzeit änderbar, auch nach Abschluss "
+                                          "von Schritt 2 und während des Zyklus; gilt sofort für die gewählten Daten.")
                 self.auto_modes_state = dpg.add_text("")
                 self._colour(self.auto_modes_state, "heading")
             self.auto_modes_text = dpg.add_text("", wrap=0)
@@ -7298,9 +7317,10 @@ class App:
 
         with dpg.window(tag="auto_modes_window", label=t("Modes und Zielzeiten"), show=False, width=700, height=520,
                         no_collapse=True):
-            item = dpg.add_text(t("Häkchen = verarbeiten. Zielvorgabe je Mode: Zeit hh:mm:ss (z. B. 24:00:00), "
-                                  "Flankenzahl (Flanken Counter, Flanken in Schritt 4 definieren) oder Ignorieren "
-                                  "(nicht verarbeiten). Leer = unendlich: keine Violation möglich."), wrap=0)
+            item = dpg.add_text(t("Häkchen = verarbeiten. Zähler je Mode (jederzeit änderbar, gilt sofort für alle "
+                                  "gewählten Daten des Modes): Zeit (Ziel hh:mm:ss), Flanke (Ziel Anzahl Flanken, "
+                                  "Signale über Flanken...) oder Ignorieren (keine Bewertung: kein Zähler, keine "
+                                  "Violation). Leeres Ziel = unendlich: keine Violation möglich."), wrap=0)
             self._colour(item, "text_dim")
             with dpg.group(horizontal=True):
                 dpg.add_button(label=t("Alle"), small=True, callback=lambda: self._auto_modes_all(True))
@@ -7308,22 +7328,7 @@ class App:
                 self.auto_modes_goal_all = dpg.add_input_text(width=110, hint="hh:mm:ss")
                 self._tooltip(self.auto_modes_goal_all, t("Zielzeit für alle angehakten Modes"))
                 dpg.add_button(label=t("für alle angehakten"), small=True, callback=lambda: self._auto_modes_goal_all())
-            self.auto_modes_box = dpg.add_child_window(height=-72, border=True)
-            with dpg.group(horizontal=True):
-                dpg.add_text(t("Eigener Mode"))
-                self.auto_own_name = dpg.add_input_text(width=260, hint=t("Name, z. B. AC_22kW_3ph_900V"), on_enter=True,
-                                                        callback=lambda: self.auto_add_own_mode())
-                self._tooltip(self.auto_own_name, t("Mode vorab festlegen, auch wenn es ihn im Quellverzeichnis noch nicht "
-                                                    "gibt. Taucht später ein Mode mit genau diesem Namen auf (gleiche "
-                                                    "Struktur, neuer Name), übernimmt er Zielzeit und verarbeiten von hier."))
-                self.auto_own_kind = dpg.add_combo(items=self._goal_kind_labels(), default_value=t("Zeit"), width=110,
-                                                   callback=lambda s, v: self._auto_own_kind_hint(v))
-                self._tooltip(self.auto_own_kind, t("Zielvorgabe: Zeit (hh:mm:ss), Flankenzahl (Anzahl Flanken; "
-                                                    "Signale und Werteband in Schritt 4 unter Flanken Counter) oder "
-                                                    "Ignorieren (Mode wird komplett ignoriert)."))
-                self.auto_own_goal = dpg.add_input_text(width=100, hint="hh:mm:ss", on_enter=True,
-                                                        callback=lambda: self.auto_add_own_mode())
-                dpg.add_button(label=t("Hinzufügen"), callback=lambda: self.auto_add_own_mode())
+            self.auto_modes_box = dpg.add_child_window(height=-40, border=True)
             with dpg.group(horizontal=True):
                 dpg.add_button(label=t("Schließen"), width=110,
                                callback=lambda: dpg.configure_item("auto_modes_window", show=False))
@@ -7363,22 +7368,6 @@ class App:
                                                                      callback=lambda: self._auto_read_form()),
                                                     "Time_counter.json nur mit Modes, in denen mindestens ein Messpunkt in "
                                                     "den Grenzen lag (sonst alle Modes mit passenden Signalen, auch 0)."))
-                with dpg.table_row():
-                    dpg.add_text(t("Zähler"))
-                    with dpg.group(horizontal=True):
-                        self.auto_counter = reg(4, tip(dpg.add_radio_button(
-                            items=[t("Time Counter"), t("Flanken Counter")], horizontal=True,
-                            default_value=t("Flanken Counter") if s.edge_count else t("Time Counter"),
-                            callback=lambda: self._auto_counter_changed()),
-                            "Time Counter: Zeit bzw. Messpunkte, in denen alle Signale eines Modes in den Grenzen "
-                            "liegen. Flanken Counter: zählt Flanken eines oder mehrerer Signale über ein Werteband "
-                            "(Wert1 oben, Wert2 unten, mindestens n Werte); Standard-Ergebnisdatei dann "
-                            "Flanken_counter.json."))
-                        self.auto_edges_btn = reg(4, tip(dpg.add_button(label=t("Flanken definieren..."),
-                                                                        callback=lambda: self.open_auto_edges_window()),
-                                                         "Signale, Werteband (Wert1, Wert2), Mindestanzahl n und Ziel "
-                                                         "des Flanken Counters festlegen."))
-                        self.auto_edges_info = dpg.add_text("")
                 with dpg.table_row():
                     dpg.add_text(t("Ergebnisdatei (alle)"))
                     with dpg.group(horizontal=True):
@@ -7436,7 +7425,6 @@ class App:
                     self.auto_table_cols.append(dpg.add_table_column(label=label, init_width_or_weight=weight))
             self.auto_log = dpg.add_input_text(multiline=True, readonly=True, width=-1, height=160, default_value="")
         self._build_auto_edges_window()
-        self._auto_counter_show()
         self._auto_show_job()
         self._auto_steps_apply()
 
@@ -7472,6 +7460,8 @@ class App:
             dpg.set_value(self.auto_step_state[step], state)
             if step in self.auto_step_btn:
                 dpg.configure_item(self.auto_step_btn[step], show=current == step)
+            if step in getattr(self, "auto_step_reset", {}):
+                dpg.configure_item(self.auto_step_reset[step], show=current == 0 or step < current)
         if dpg.does_item_exist(getattr(self, "auto_run_step_state", 0) or 0):
             dpg.set_value(self.auto_run_step_state, dpg.get_value(self.auto_step_state[4]))
             ready = current in (0, 4)
@@ -7513,36 +7503,29 @@ class App:
         elif step == 2:
             modes = self._auto_eval_modes()
             on = {m: jobs for m, jobs in modes.items() if any(j.get("enabled", True) for j in jobs)}
-            waiting = self._auto_waiting_modes()
-            if not on and not waiting:
-                self._message(t("Schritt 2: mindestens einen Mode zum Verarbeiten anhaken oder einen eigenen Mode "
-                                "festlegen (Modes und Zielzeiten...)."), error=True)
+            if not on:
+                self._message(t("Schritt 2: mindestens einen Mode zum Verarbeiten anhaken (Modes und Zielzeiten...)."),
+                              error=True)
+                return False
+            missing_edges = self._auto_edge_problems(modes)
+            if missing_edges:
+                self._message(t("Schritt 2: Zähler Flanke ohne Flanken bei: {names} (Flanken... drücken).",
+                                names=", ".join(missing_edges)), error=True)
                 return False
             text = t("Schritt 2 abgeschlossen: {count} Modes werden verarbeitet.", count=len(on))
-            if waiting:
-                text += " " + t("Eigene Modes warten auf Daten: {names} (werden verarbeitet, sobald ihr Ordner "
-                                "auftaucht; Grenzen beim ersten Zyklus aus den Daten).", names=", ".join(waiting))
             endless = [m for m, jobs in on.items() if self._goal_infinite(jobs)]
             if endless:
                 text += " " + t("Ohne Zielvorgabe (unendlich, keine Violation): {names}.", names=", ".join(endless))
-            if any(self._mode_goal(jobs)["kind"] == "edges" for jobs in on.values()):
-                text += " " + t("Flankenzahl: {hint}.", hint=self._edge_goal_hint())
+            silent = [m for m, jobs in on.items() if self._mode_goal(jobs)["kind"] == "ignore"]
+            if silent:
+                text += " " + t("Ohne Bewertung: {names}.", names=", ".join(silent))
         elif step == 3:
-            waiting = self._auto_waiting_modes()
-            if self.limit_cfg is None and waiting and not self._auto_enabled_found():
-                text = t("Schritt 3 abgeschlossen.") + " " + t("Noch ohne Grenzen (Vorschlag beim ersten Zyklus): "
-                                                             "{names}", names=", ".join(waiting))
-                self._auto_set_step(step + 1)
-                self._message(text)
-                self.open_auto_run_window()
-                return True
             if self.limit_cfg is None:
                 self._message(t("Schritt 3: bitte zuerst Analysieren (es gibt noch keine Grenzwert-Konfiguration)."),
                               error=True)
                 return False
             missing = sorted({self._auto_mode(j) for j in self.auto_jobs if j.get("enabled", True)
-                              and self._auto_mode(j) not in self.limit_cfg.modes} |
-                             {m for m in waiting if m not in self.limit_cfg.modes})
+                              and self._auto_mode(j) not in self.limit_cfg.modes})
             text = t("Schritt 3 abgeschlossen.")
             if missing:
                 text += " " + t("Noch ohne Grenzen (Vorschlag beim ersten Zyklus): {names}", names=", ".join(missing))
@@ -7555,11 +7538,23 @@ class App:
         return True
 
     def auto_reset_steps(self) -> None:
-        self._auto_set_step(1)
-        self._message(t("Auto: Schritte zurückgesetzt - weiter mit Schritt 1."))
+        self.auto_reset_step(1)
+
+    def auto_reset_step(self, step: int) -> None:
+        """Schritt n und alle folgenden zurücksetzen (Schritt 1 = alle): wieder offen, laufender Zyklus stoppt."""
+        if self.auto_running:
+            self.stop_auto()
+        self._auto_set_step(step)
+        if step == 1:
+            self._message(t("Auto: Schritte zurückgesetzt - weiter mit Schritt 1."))
+        else:
+            self._message(t("Auto: Schritt {n} und folgende zurückgesetzt - weiter mit Schritt {n}.", n=step))
 
     # ---------------------------------------------------------------- Auswertungen: Name -> Verzeichnisregel
     STAR = "****"
+
+    def _auto_eval_get(self, name: str) -> dict | None:
+        return next((e for e in getattr(self, "auto_evals", []) if e["name"] == name), None)
 
     def _auto_eval(self) -> dict | None:
         name = getattr(self, "auto_eval_name", "")
@@ -7787,9 +7782,7 @@ class App:
         for unit in units:
             job = by_key.pop(norm(unit["key"]), None)
             if job is None:
-                own = (ev.get("modes") or {}).get(unit["mode"])          # vorab festgelegter (eigener) Mode
-                known = goals.get(unit["mode"]) or ([own] if own else [])
-                goal = self._mode_goal(known)
+                goal = self._mode_goal(goals.get(unit["mode"]) or [])   # neuer DUT übernimmt Zähler/Ziel des Modes
                 job = {"name": "", "target_time": goal["time"], "enabled": True, "mode": "", "goal_kind": goal["kind"],
                        "target_edges": goal["edges"]}
                 self.auto_jobs.append(job)
@@ -7797,8 +7790,6 @@ class App:
                 same_mode = [j for j in mine if self._auto_mode_name(j) == unit["mode"]]
                 if same_mode:
                     job["enabled"] = any(j.get("enabled", True) for j in same_mode)
-                elif own is not None:
-                    job["enabled"] = bool(own.get("enabled", True))
             job.update(source=unit["source"], folders=unit["folders"], exclude=unit["exclude"], files=unit["files"],
                        target=unit["target"],
                        rule=rule.name, rule_mode=unit["mode"], evaluation=ev["name"])
@@ -7930,173 +7921,53 @@ class App:
                         box = dpg.add_checkbox(label=mode, default_value=on, user_data=mode,
                                                callback=lambda s, v, u: self._auto_mode_toggle(u, v))
                         kind = dpg.add_combo(items=self._goal_kind_labels(), width=110, user_data=mode,
-                                             default_value=self._goal_kind_label("ignore" if not on else spec["kind"]),
+                                             default_value=self._goal_kind_label(spec["kind"]),
                                              callback=lambda s, v, u: self._auto_mode_kind(u, v))
                         field = dpg.add_input_text(default_value=self._goal_text(spec), width=100,
                                                    hint=self._goal_hint(spec["kind"]), user_data=mode,
                                                    callback=lambda s, v, u: self._auto_mode_goal(u, v))
                         dpg.add_text(t("{count} DUT", count=len(jobs)))
+                        edges = dpg.add_button(label=t("Flanken..."), small=True, user_data=mode,
+                                               show=spec["kind"] == "edges",
+                                               callback=lambda s, a, u: self.open_auto_edges_window(u))
+                        self._tooltip(edges, t("Signale, Werteband (Wert1, Wert2) und Mindestanzahl n für den "
+                                               "Flanken Counter dieses Modes festlegen."))
                         note = dpg.add_text("")
                         self._colour(note, "error")
                         info = dpg.add_text("")
                         self._colour(info, "text_dim")
-                        if mode in self._auto_own_modes():
-                            dpg.add_text(t("(eigener Mode)"))
-                    self.auto_mode_rows[mode] = (box, field, note, kind, info)
+                    self.auto_mode_rows[mode] = (box, field, note, kind, info, edges)
                     self._auto_goal_notes(mode)
-        self._auto_own_fill(modes)
-
-    def _auto_waiting_modes(self, every: bool = False) -> list:
-        """Eigene Modes, die verarbeitet werden sollen, deren Ordner es aber noch nicht gibt (gewählte Auswertung oder
-        alle)."""
-        evals = getattr(self, "auto_evals", []) if every else [e for e in [self._auto_eval()] if e is not None]
-        out = []
-        for ev in evals:
-            found = {self._auto_mode_name(j) for j in self._auto_eval_jobs(ev)}
-            for mode, spec in (ev.get("modes") or {}).items():
-                if spec.get("enabled", True) and spec.get("goal_kind") != "ignore" and mode not in found:
-                    out.append(mode)
-        return sorted(set(out), key=str.casefold)
-
-    def _auto_enabled_found(self) -> bool:
-        return any(j.get("enabled", True) for j in self._auto_eval_jobs())
-
-    def _auto_own_modes(self) -> dict:
-        ev = self._auto_eval()
-        return ev.setdefault("modes", {}) if ev is not None else {}
-
-    def _auto_own_fill(self, modes: dict) -> None:
-        """Eigene (vorab festgelegte) Modes, die es im Quellverzeichnis noch nicht gibt."""
-        waiting = {m: v for m, v in self._auto_own_modes().items() if m not in modes}
-        if not waiting:
-            return
-        with dpg.tree_node(label=t("Eigene Modes, noch nicht gefunden ({count})", count=len(waiting)),
-                           default_open=True, parent=self.auto_modes_box):
-            for mode, spec in sorted(waiting.items(), key=lambda x: x[0].casefold()):
-                on = bool(spec.get("enabled", True))
-                goal = self._mode_goal([spec])
-                with dpg.group(horizontal=True):
-                    box = dpg.add_checkbox(label=mode, default_value=on, user_data=mode,
-                                           callback=lambda s, v, u: self._auto_own_set(u, enabled=v))
-                    kind = dpg.add_combo(items=self._goal_kind_labels(), width=110, user_data=mode,
-                                         default_value=self._goal_kind_label("ignore" if not on else goal["kind"]),
-                                         callback=lambda s, v, u: self._auto_own_set(u, kind=v))
-                    field = dpg.add_input_text(default_value=self._goal_text(goal), width=100,
-                                               hint=self._goal_hint(goal["kind"]), user_data=mode,
-                                               callback=lambda s, v, u: self._auto_own_set(u, goal=v))
-                    dpg.add_text(t("wartet auf Daten"))
-                    dpg.add_button(label=t("Entfernen"), small=True, user_data=mode,
-                                   callback=lambda s, a, u: self._auto_own_remove(u))
-                    note = dpg.add_text("")
-                    self._colour(note, "error")
-                    info = dpg.add_text("")
-                    self._colour(info, "text_dim")
-                self.auto_mode_rows[mode] = (box, field, note, kind, info)
-                self._auto_goal_notes(mode)
-
-    def auto_add_own_mode(self) -> None:
-        """Eigenen Mode mit Zielzeit anlegen; gibt es ihn schon unter den gefundenen, gilt die Zielzeit sofort."""
-        if self._auto_eval() is None:
-            self._message(t("Auto: zuerst eine Auswertung anlegen oder wählen (Name, Anlegen)."), error=True)
-            return
-        name = re.sub(r"\s+", "_", dpg.get_value(self.auto_own_name).strip())
-        if not name:
-            self._message(t("Eigener Mode: bitte einen Namen eingeben."), error=True)
-            return
-        kind = self._goal_kind_key(dpg.get_value(self.auto_own_kind)) if getattr(self, "auto_own_kind", None) else "time"
-        spec = {"goal_kind": kind, "target_time": "", "target_edges": "", "enabled": kind != "ignore"}
-        try:
-            self._goal_store(spec, kind, dpg.get_value(self.auto_own_goal))
-        except ValueError:
-            self._message(t("Zielzeit: hh:mm:ss erwartet, z. B. 24:00:00.") if kind == "time" else
-                          t("Flankenzahl: ganze Zahl ab 1 erwartet (leer = unendlich)."), error=True)
-            return
-        self._auto_own_modes()[name] = spec
-        found = self._auto_eval_modes().get(name)
-        for job in found or []:                            # Mode gibt es schon: Vorgabe gleich übernehmen
-            self._goal_copy(spec, job)
-            job["enabled"] = spec["enabled"]
-        dpg.set_value(self.auto_own_name, "")
-        dpg.set_value(self.auto_own_goal, "")
-        if getattr(self, "auto_own_kind", None):          # nächste Eingabe wieder mit Zeit
-            dpg.set_value(self.auto_own_kind, t("Zeit"))
-            self._auto_own_kind_hint(t("Zeit"))
-        self._auto_modes_changed()
-        self._auto_modes_fill()
-        text = self._goal_display(self._mode_goal([spec])) if kind != "ignore" else t("ignoriert")
-        if kind == "edges":
-            text += "; " + self._edge_goal_hint()
-        self._message(t("Eigener Mode {name} ({goal}) festgelegt{found}.", name=name, goal=text,
-                        found=t(" - für {count} vorhandene DUTs übernommen", count=len(found)) if found else
-                        t(" - wird übernommen, sobald der Mode im Quellverzeichnis auftaucht")))
-
-    def _auto_own_set(self, mode: str, enabled: bool | None = None, goal: str | None = None,
-                      kind: str | None = None) -> None:
-        spec = self._auto_own_modes().get(mode)
-        if spec is None:
-            return
-        row = getattr(self, "auto_mode_rows", {}).get(mode)
-        if enabled is not None:
-            spec["enabled"] = bool(enabled)
-            if enabled and spec.get("goal_kind") == "ignore":
-                spec["goal_kind"] = "time"
-            self._auto_row_sync(mode, spec)
-        if kind is not None:
-            key = self._goal_kind_key(kind)
-            spec["goal_kind"] = key
-            spec["enabled"] = key != "ignore"
-            self._auto_row_sync(mode, spec)
-        if goal is not None:
-            try:
-                self._goal_store(spec, self._mode_goal([spec])["kind"], goal)
-            except ValueError:
-                if row is not None:
-                    dpg.set_value(row[2], self._goal_error(spec.get("goal_kind", "time")))
-                return
-        self._auto_goal_notes(mode)
-        self._auto_modes_changed()
-
-    def _auto_own_remove(self, mode: str) -> None:
-        self._auto_own_modes().pop(mode, None)
-        self._auto_modes_changed()
-        self._auto_modes_fill()
 
     def _auto_mode_specs(self, mode: str) -> list:
-        """Alle Stellen, die die Zielvorgabe eines Modes tragen: seine Teile (DUTs) und ggf. der eigene Mode."""
-        specs = list(self._auto_eval_modes().get(mode, []))
-        if mode in self._auto_own_modes():
-            specs.append(self._auto_own_modes()[mode])
-        return specs
+        """Die Teile (DUTs) eines Modes: sie tragen verarbeiten, Zähler und Ziel."""
+        return list(self._auto_eval_modes().get(mode, []))
 
     def _auto_mode_toggle(self, mode: str, value: bool) -> None:
         for spec in self._auto_mode_specs(mode):
             spec["enabled"] = bool(value)
-            if value and spec.get("goal_kind") == "ignore":
-                spec["goal_kind"] = "time"
-        specs = self._auto_mode_specs(mode)
-        if specs:
-            self._auto_row_sync(mode, specs[0])
         self._auto_goal_notes(mode)
         self._auto_modes_changed()
 
     def _auto_mode_kind(self, mode: str, label: str) -> None:
-        """Zielart wählen: Zeit, Flankenzahl oder Ignorieren (= nicht verarbeiten, Häkchen aus)."""
+        """Zähler wählen: Zeit, Flanke oder Ignorieren (keine Bewertung). Gilt sofort für alle Teile des Modes."""
         key = self._goal_kind_key(label)
         for spec in self._auto_mode_specs(mode):
             spec["goal_kind"] = key
-            spec["enabled"] = key != "ignore"
         specs = self._auto_mode_specs(mode)
         if specs:
             self._auto_row_sync(mode, specs[0])
         self._auto_goal_notes(mode)
         self._auto_modes_changed()
+        if key == "edges" and not self._auto_edges_valid(mode) and dpg.does_item_exist("auto_edges_window"):
+            self.open_auto_edges_window(mode)             # Flanken gleich festlegen
 
     def _auto_mode_goal(self, mode: str, text: str) -> None:
         row = getattr(self, "auto_mode_rows", {}).get(mode)
         specs = self._auto_mode_specs(mode)
         kind = self._mode_goal(specs)["kind"] if specs else "time"
         if kind == "ignore":
-            kind = "time"
+            return
         try:
             for spec in specs:
                 self._goal_store(spec, kind, text)
@@ -8112,7 +7983,7 @@ class App:
 
     @staticmethod
     def _goal_kind_labels() -> list:
-        return [t("Zeit"), t("Flankenzahl"), t("Ignorieren")]
+        return [t("Zeit"), t("Flanke"), t("Ignorieren")]
 
     def _goal_kind_label(self, key: str) -> str:
         return dict(zip(self.GOAL_KINDS, self._goal_kind_labels())).get(key, t("Zeit"))
@@ -8150,12 +8021,6 @@ class App:
         spec["goal_kind"] = kind if kind in self.GOAL_KINDS else "time"
 
     @staticmethod
-    def _goal_copy(src: dict, dst: dict) -> None:
-        for key in ("goal_kind", "target_time", "target_edges"):
-            if key in src:
-                dst[key] = src[key]
-
-    @staticmethod
     def _mode_goal(specs) -> dict:
         """Zielvorgabe eines Modes aus seinen Teilen: {"kind", "time", "edges"}; ältere Einstellungen ohne Zielart
         = Zeit."""
@@ -8176,29 +8041,22 @@ class App:
             return t("{count} Flanken", count=goal["edges"]) if goal["edges"] else t("unendlich (Flanken)")
         return self._goal_hms(goal["time"]) if goal["time"] else t("unendlich")
 
-    def _edge_goal_hint(self) -> str:
-        """Hinweis zur Flankenzahl: Flanken werden in Schritt 4 (Flanken Counter) definiert."""
-        if not self.auto_settings.edge_count:
-            return t("Flanken Counter in Schritt 4 wählen und Flanken definieren")
-        if not self._auto_edges_valid():
-            return t("Flanken in Schritt 4 definieren (Flanken definieren...)")
-        return t("Flanken aus Schritt 4: {text}", text=self._auto_edges_summary())
-
     def _auto_row_sync(self, mode: str, spec: dict) -> None:
-        """Häkchen, Zielart und Eingabefeld einer Zeile an die gespeicherte Vorgabe anpassen."""
+        """Zähler, Eingabefeld und Flanken-Knopf einer Zeile an die gespeicherte Vorgabe anpassen."""
         row = getattr(self, "auto_mode_rows", {}).get(mode)
         if row is None or len(row) < 4:
             return
         goal = self._mode_goal([spec])
-        on = bool(spec.get("enabled", True))
-        kind = goal["kind"] if on else "ignore"
-        dpg.set_value(row[0], on)
+        kind = goal["kind"]
+        dpg.set_value(row[0], bool(spec.get("enabled", True)))
         dpg.set_value(row[3], self._goal_kind_label(kind))
-        dpg.set_value(row[1], self._goal_text(dict(goal, kind=kind)))
+        dpg.set_value(row[1], self._goal_text(goal))
         dpg.configure_item(row[1], hint=self._goal_hint(kind), enabled=kind != "ignore")
+        if len(row) > 5:
+            dpg.configure_item(row[5], show=kind == "edges")
 
     def _auto_goal_notes(self, mode: str) -> None:
-        """Hinweise einer Zeile: Fehler leeren, Info zu unendlich, Ignorieren und Flanken (Schritt 4)."""
+        """Hinweise einer Zeile: Fehler leeren, Info zu unendlich, Ignorieren und den Flanken des Modes."""
         row = getattr(self, "auto_mode_rows", {}).get(mode)
         if row is None:
             return
@@ -8208,19 +8066,28 @@ class App:
         dpg.set_value(row[2], "")
         if len(row) < 5:
             return
-        if not on or goal["kind"] == "ignore":
-            info = t("wird komplett ignoriert")
+        if not on:
+            info = t("wird nicht verarbeitet")
+        elif goal["kind"] == "ignore":
+            info = t("keine Bewertung (kein Zähler, keine Violation)")
         elif goal["kind"] == "edges":
-            info = (t("Ziel unendlich - ") if not goal["edges"] else "") + self._edge_goal_hint()
+            if not self._auto_edges_valid(mode):
+                info = ""
+                dpg.set_value(row[2], t("Flanken fehlen - Flanken... drücken"))
+            else:
+                info = (t("Ziel unendlich - ") if not goal["edges"] and not self._edges_have_target(mode) else "") + \
+                    self._auto_edges_summary(mode)
         else:
             info = "" if goal["time"] else t("unendlich - keine Violation möglich")
         dpg.set_value(row[4], info)
 
-    def _auto_own_kind_hint(self, label: str) -> None:
-        kind = self._goal_kind_key(label)
-        dpg.configure_item(self.auto_own_goal, hint=self._goal_hint(kind), enabled=kind != "ignore")
-        if kind == "edges":
-            self._message(t("Flankenzahl: {hint}", hint=self._edge_goal_hint()))
+    def _edges_have_target(self, mode: str) -> bool:
+        return any(e.get("target") for e in self._auto_edges_valid(mode))
+
+    def _auto_edge_problems(self, modes: dict) -> list:
+        """Verarbeitete Modes mit Zähler Flanke, aber ohne gültige Flanke."""
+        return [m for m, jobs in modes.items() if any(j.get("enabled", True) for j in jobs)
+                and self._mode_goal(jobs)["kind"] == "edges" and not self._auto_edges_valid(m)]
 
     def _auto_modes_all(self, value: bool) -> None:
         for mode in self._auto_eval_modes():
@@ -8263,9 +8130,6 @@ class App:
             parts.append(f"{mode}: {state}" + ("" if mode in on else " " + t("(nicht verarbeiten)")))
         head = t("{count} Modes, {on} verarbeiten, {missing} ohne Zielvorgabe (unendlich)", count=len(modes),
                  on=len(on), missing=len(missing))
-        waiting = [m for m in self._auto_own_modes() if m not in modes]
-        if waiting:
-            head += "; " + t("eigene Modes ohne Daten: {names}", names=", ".join(waiting))
         return head + "\n" + " | ".join(parts)
 
     def _auto_set_json_dir(self, folder: str) -> None:
@@ -8274,7 +8138,7 @@ class App:
         self._auto_read_form()
 
     def _auto_json_default(self) -> None:
-        dpg.set_value(self.auto_json, self._auto_json_default_name())
+        dpg.set_value(self.auto_json, self.AUTO_JSON_DEFAULT)
         self._auto_read_form()
 
     def analyze_auto_source(self, readjust: bool = False) -> None:
@@ -8287,13 +8151,7 @@ class App:
         if job.get("rule") and not getattr(self, "auto_batch", None):
             jobs = [j for j in self._auto_rule_jobs(job) if j.get("enabled", True) and j.get("source")]
             if not jobs:
-                waiting = self._auto_waiting_modes()
-                if waiting:
-                    self._message(t("Auto: Analyse noch nicht möglich - eigene Modes warten auf Daten ({names}); "
-                                    "ihre Grenzen werden beim ersten Zyklus aus den Daten vorgeschlagen. Schritt 3 "
-                                    "kann abgeschlossen werden.", names=", ".join(waiting)))
-                else:
-                    self._message(t("Auto: Kein Mode der Regel ist zum Verarbeiten gewählt."), error=True)
+                self._message(t("Auto: Kein Mode der Regel ist zum Verarbeiten gewählt."), error=True)
                 return
             if self._auto_busy():
                 self._message(t("Auto: Es läuft bereits ein Zyklus."))
@@ -8587,8 +8445,6 @@ class App:
         s.source, s.target, s.mode = job.get("source", ""), job.get("target", ""), job.get("mode", "")
         s.png = bool(dpg.get_value(self.auto_png))
         s.only_hits = bool(dpg.get_value(self.auto_hits))
-        if getattr(self, "auto_counter", None):
-            s.edge_count = dpg.get_value(self.auto_counter) == t("Flanken Counter")
         s.one_group = bool(dpg.get_value(self.auto_one))
         try:
             s.json_name = self._auto_json_name(dpg.get_value(self.auto_json))
@@ -8692,7 +8548,10 @@ class App:
         """count_<Mode>_<Gruppe> -> (Mode, Gruppe); Mode aus der Konfiguration bzw. dem Teil (längster Treffer)."""
         if key.startswith("edges_"):                       # Flanken Counter: edges_<Signal>_<Gruppe>
             body = key[6:]
-            for name in sorted({str(e.get("signal") or "") for e in self._auto_edges()}, key=len, reverse=True):
+            ev = self._auto_eval_get(job.get("evaluation") or "") if job.get("evaluation") else self._auto_eval()
+            signals = {str(e.get("signal") or "") for edges in ((ev or {}).get("mode_edges") or {}).values()
+                       for e in edges}
+            for name in sorted(signals, key=len, reverse=True):
                 if name and body.startswith(name + "_"):
                     return name, body[len(name) + 1:]
             return "", body
@@ -8786,21 +8645,16 @@ class App:
         if not self._auto_read_form():
             return False
         active = [j for j in self.auto_jobs if j["enabled"]]
-        waiting = self._auto_waiting_modes(every=True)
-        if not active and not waiting:
+        if not active:
             self._message(t("Auto: Keine aktive Auswertung."), error=True)
             return False
-        if self.auto_settings.edge_count and not self._auto_edges_valid():
-            self._message(t("Flanken Counter: bitte mindestens ein Signal mit Wert1 oder Wert2 festlegen "
-                            "(Flanken definieren...)."), error=True)
+        missing_edges = self._auto_edge_problems_all()
+        if missing_edges:
+            self._message(t("Zähler Flanke ohne Flanken bei: {names} (Modes und Zielzeiten..., Flanken...).",
+                            names=", ".join(missing_edges)), error=True)
             return False
         problems = [(j, self._auto_problem(j)) for j in active]
         bad = [f"{j['name']}: {p}" for j, p in problems if p]
-        if not active:                                    # nur eigene Modes ohne Daten: Zyklus sucht ihre Ordner
-            self._message(t("Auto: eigene Modes warten auf Daten: {names}. Jeder Zyklus sucht ihre Ordner.",
-                            names=", ".join(waiting)))
-            self._save_settings()
-            return True
         if len(bad) == len(active):
             self._message(t("Auto: {text}", text="; ".join(bad)), error=True)
             return False
@@ -8831,11 +8685,8 @@ class App:
         for job in self._auto_ready_jobs():
             self._auto_engine_for(job).log(t("Start: {src} -> {dst}, Zyklus {cycle}", src=job["source"], dst=job["target"],
                                              cycle=limitconfig.format_time(self.auto_settings.cycle_s)))
-        text = t("Auto-Auswertung gestartet (Zyklus {cycle}).", cycle=limitconfig.format_time(self.auto_settings.cycle_s))
-        waiting = self._auto_waiting_modes(every=True)
-        if waiting:
-            text += " " + t("Eigene Modes warten auf Daten: {names}.", names=", ".join(waiting))
-        self._message(text)
+        self._message(t("Auto-Auswertung gestartet (Zyklus {cycle}).",
+                        cycle=limitconfig.format_time(self.auto_settings.cycle_s)))
         self._auto_refresh()
 
     def stop_auto(self) -> None:
@@ -10513,17 +10364,21 @@ class App:
             with dpg.group(horizontal=True):
                 dpg.add_text(t("Grenzen aus Daten vorschlagen:"))
                 self._tooltip(dpg.add_button(label=t("Dieser Mode"), callback=lambda: self._le_suggest()),
-                              t("Nur dieser Mode: sichtbare aktive Signale ohne Grenzen bekommen Datenbereich "
-                                "(Min/Max aller Dateien) plus Abstand in Prozent."))
+                              t("Nur dieser Mode: sichtbare aktive Signale mit Daten bekommen neue Grenzen = "
+                                "Datenbereich (Min/Max aller Dateien) plus Abstand in Prozent; vorhandene Grenzen "
+                                "werden neu berechnet. Von Hand eingetragene Grenzen bleiben."))
                 self._tooltip(dpg.add_button(label=t("Alle Modes"), callback=lambda: self._le_suggest_all()),
-                              t("Alle Modes der Konfiguration: aktive Signale ohne Grenzen (Suchfeld und Nur aktive "
-                                "gelten) bekommen Datenbereich plus Abstand in Prozent. Daten je Mode aus der "
-                                "Auto-Analyse aller Dateien dieses Modes, sonst aus allen geladenen Dateien."))
+                              t("Alle Modes der Konfiguration: aktive Signale mit Daten (Suchfeld gilt) bekommen neue "
+                                "Grenzen = Datenbereich plus Abstand in Prozent. Daten je Mode aus der Auto-Analyse "
+                                "aller Dateien dieses Modes, sonst aus allen geladenen Dateien. Von Hand eingetragene "
+                                "Grenzen bleiben."))
                 dpg.add_text(t("Abstand"))
-                self.le_margin = dpg.add_input_float(width=90, default_value=10.0, step=0, format="%.1f %%")
+                self.le_margin = dpg.add_input_float(width=90, default_value=10.0, step=0, format="%.1f %%",
+                                                     callback=lambda: self._le_margin_changed())
                 self._tooltip(self.le_margin, t("Abstand der vorgeschlagenen Grenzen zum Datenbereich (Min/Max) in "
-                                                "Prozent der Spannweite; gilt für beide Varianten (dieser Mode und alle "
-                                                "Modes), jeweils für aktive Signale ohne Grenzen."))
+                                                "Prozent der Spannweite; gilt für beide Varianten. Ändern berechnet die "
+                                                "Grenzen der sichtbaren aktiven Signale dieses Modes sofort neu (von "
+                                                "Hand eingetragene bleiben)."))
             self.le_count = dpg.add_text("")
             self._colour(self.le_count, "text_dim")
             self.le_table_area = dpg.add_child_window(height=-1, border=True)
@@ -10788,6 +10643,13 @@ class App:
             enabled = True                         # erste Grenze für ein neues Signal: gleich aktiv
             if name in self.le_widgets:
                 dpg.set_value(self.le_widgets[name][0], True)
+        if field_name != "enabled":                # von Hand eingetragen: Vorschläge überschreiben sie nicht
+            if not hasattr(self, "le_manual"):
+                self.le_manual = set()
+            if lower is None and upper is None:
+                self.le_manual.discard((mode.name, name))
+            else:
+                self.le_manual.add((mode.name, name))
         if not enabled and lower is None and upper is None:
             mode.remove_entry(name)               # nichts eingetragen: aus der Konfiguration nehmen
         else:
@@ -10811,29 +10673,42 @@ class App:
         """Abstand in Prozent der Spannweite (gilt für beide Vorschlags-Varianten)."""
         return max(0.0, float(dpg.get_value(self.le_margin) or 0.0)) / 100.0
 
-    @staticmethod
-    def _le_fill(mode, rows, share: float) -> int:
-        """Aktive Signale ohne Grenzen: Datenbereich plus Abstand; Anzahl der gesetzten Signale."""
-        count = 0
+    def _le_fill(self, mode, rows, share: float) -> tuple[int, int]:
+        """Aktive Signale mit Daten: Grenzen = Datenbereich plus Abstand (vorhandene Vorschläge werden neu berechnet).
+        Von Hand im Konfigurator eingetragene Grenzen bleiben. Liefert (gesetzt, von Hand behalten)."""
+        count = kept = 0
+        manual = getattr(self, "le_manual", set())
         for name, _unit, _files, lo, hi in rows:
             entry = mode.entries.get(name)
-            if entry is None or not entry.enabled or entry.lower is not None or entry.upper is not None \
-                    or lo is None or hi is None:
+            if entry is None or not entry.enabled or lo is None or hi is None:
+                continue
+            if (mode.name, name) in manual:
+                kept += 1
                 continue
             pad = (hi - lo) * share or abs(hi) * share or share
             mode.set_entry(name, True, round(lo - pad, 6), round(hi + pad, 6))
             count += 1
-        return count
+        return count, kept
+
+    @staticmethod
+    def _le_kept_text(kept: int) -> str:
+        return "  " + t("{count} von Hand eingetragene Grenzen bleiben.", count=kept) if kept else ""
 
     def _le_suggest(self) -> None:
-        """Nur dieser Mode: sichtbare aktive Signale ohne Grenzen, Datenbereich plus Abstand in Prozent der Spannweite."""
+        """Nur dieser Mode: sichtbare aktive Signale mit Daten, Datenbereich plus Abstand in Prozent der Spannweite."""
         mode = self._le_mode()
         if mode is None:
             return
-        count = self._le_fill(mode, self._le_visible(), self._le_share())
+        share = self._le_share()
+        count, kept = self._le_fill(mode, self._le_visible(), share)
         self._le_changed(mode)
         self._le_rows()
-        self._message(t("Grenzen für {count} Signale aus den Daten vorgeschlagen.", count=count))
+        self._message(t("Grenzen für {count} Signale aus den Daten vorgeschlagen ({pct} %).", count=count,
+                        pct=f"{share * 100:g}") + self._le_kept_text(kept))
+
+    def _le_margin_changed(self) -> None:
+        """Abstand geändert: Vorschläge dieses Modes sofort neu berechnen."""
+        self._le_suggest()
 
     def _le_mode_rows(self, mode_name: str) -> tuple[list, str]:
         """Datenbereiche für einen Mode: Auto-Analyse dieses Modes (alle Dateien seiner DUTs), sonst alle geladenen
@@ -10862,14 +10737,15 @@ class App:
         if self.limit_cfg is None:
             return
         share = self._le_share()
-        total, touched, without = 0, [], []
+        total, touched, without, kept = 0, [], [], 0
         for name in self.limit_cfg.mode_names():
             mode = self.limit_cfg.modes[name]
             rows, source = self._le_mode_rows(name)
             if not rows and not self.auto_mode_stats.get(name):
                 without.append(name)
                 continue
-            count = self._le_fill(mode, rows, share)
+            count, skipped = self._le_fill(mode, rows, share)
+            kept += skipped
             if count:
                 total += count
                 touched.append(name)
@@ -10883,7 +10759,7 @@ class App:
                  modes=len(touched), pct=f"{share * 100:g}")
         if without:
             text += "  " + t("Ohne Daten: {names} (Auto > Analysieren oder Dateien laden).", names=", ".join(without))
-        self._message(text)
+        self._message(text + self._le_kept_text(kept))
 
     def close_limit_config(self) -> None:
         had = self.limit_cfg is not None

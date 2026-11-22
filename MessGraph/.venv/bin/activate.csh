@@ -9,7 +9,7 @@ alias deactivate 'test $?_OLD_VIRTUAL_PATH != 0 && setenv PATH "$_OLD_VIRTUAL_PA
 # Unset irrelevant variables.
 deactivate nondestructive
 
-setenv VIRTUAL_ENV /home/mfischer/Schreibtisch/MeineTools/MessGraph_20261120/MessGraph/.venv
+setenv VIRTUAL_ENV /home/mfischer/Schreibtisch/MessGraph/MessGraph/.venv
 
 set _OLD_VIRTUAL_PATH="$PATH"
 setenv PATH "$VIRTUAL_ENV/"bin":$PATH"

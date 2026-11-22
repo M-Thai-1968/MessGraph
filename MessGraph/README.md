@@ -88,7 +88,7 @@ Programmlogik ohne Bildschirm läuft. Das ersetzt keinen Test mit dem echten Pak
 
 ## Prüfstand
 
-Die Versionen 1.0.0 bis 1.74.1 wurden ohne die Pakete `dearpygui`, `asammdf` und `pyarrow` entwickelt.
+Die Versionen 1.0.0 bis 1.75.1 wurden ohne die Pakete `dearpygui`, `asammdf` und `pyarrow` entwickelt.
 Mit echten Daten geprüft sind die CSV-Erkennung und die Messrechnung. Die Oberfläche sowie die
 Parquet- und MF4-Leser liefen nur gegen Nachbildungen und sind beim ersten echten Start zu prüfen.
 
@@ -272,6 +272,30 @@ Die Wahl gilt für Drift (Regression), Prognose, Zielzeit-Bewertung, Regressions
 Dazu im Menü ein Schalter für die Regressionslinien.
 Ab 1.47.1 sind die Arten im Menü nummeriert ((1) bis (4)); die Nummer steht im Spaltenkopf der Wertanzeige
 ("Drift (Regression 3)"), im Detailfenster und in der Signaltabelle des Reports und wechselt beim Umschalten sofort.
+
+## Grenzwert-Konfigurator: Abstand berechnet Vorschläge neu (1.75.1)
+
+- "Dieser Mode"/"Alle Modes" wirkten scheinbar nicht: sie füllten nur aktive Signale ganz ohne Grenzen - nach der
+  Analyse haben aber alle aktiven Signale Grenzen. Jetzt werden vorhandene Grenzen aktiver Signale mit Daten neu
+  berechnet (Datenbereich plus Abstand).
+- Abstand ändern (`_le_margin_changed`) berechnet die sichtbaren aktiven Signale des bearbeiteten Modes sofort neu.
+- Von Hand in der Tabelle eingetragene Grenzen (`le_manual`, je Sitzung) werden nicht überschrieben; die
+  Statuszeile nennt ihre Anzahl.
+
+## Zähler je Mode in Schritt 2, Schritte einzeln rücksetzbar (1.75.0)
+
+- Der Zähler kommt nicht mehr aus den Daten bzw. einem globalen Schalter in Schritt 4, sondern je Mode aus
+  Schritt 2: Zeit, Flanke oder Ignorieren (`goal_kind` time | edges | ignore an den Teilen/DUTs). Ignorieren = keine
+  Bewertung (`AutoSettings.no_eval`: keine Zähler, keine Violation, Bilder/Statistik weiter); Häkchen aus = nicht
+  verarbeiten. Modes und Zielzeiten... ist immer bedienbar; Änderungen gelten sofort (nächster Zyklus bewertet neu).
+- Flanken je Mode: `ev["mode_edges"][Mode]`, Fenster über "Flanken..." in der Mode-Zeile. `_auto_job_settings`
+  setzt edge_count/edges/edge_target/no_eval je Teil. Schritt 2 und Start prüfen Modes mit Flanke ohne Flanke.
+- Ergebnisdateien: Zeit -> Time_counter.json (bzw. eigener Name), Flanke -> `_edge_json_name` daneben
+  (Flanken_counter.json, HTOE_Flanken_counter.json, <Name>_Flanken.json).
+- Entfernt: Zähler-Auswahl und "Flanken definieren..." in Schritt 4, eigene Modes (vorab festgelegte Modes, die
+  beim Auftauchen übernommen wurden) samt Sonderfall aus 1.74.1. Neue DUT-Ordner übernehmen Zähler/Ziel ihres Modes.
+- Jeder Schritt hat "Schritt zurücksetzen": setzt ihn und alle folgenden zurück (Schritt 1 = alle), stoppt einen
+  laufenden Zyklus; Einstellungen und Ergebnisse bleiben.
 
 ## Eigene Modes ohne Daten reichen für Schritt 2-4 (1.74.1)
 

@@ -68,13 +68,15 @@ class AutoSettings:
     edge_count: bool = False            # Flanken Counter statt Time Counter
     edges: tuple = ()                   # Flankendefinitionen: {"signal", "upper" (Wert1), "lower" (Wert2), "n", "target"}
     edge_target: int | None = None      # Flankenzahl des Modes (Schritt 2), gilt für Flanken ohne eigenes Ziel
+    no_eval: bool = False               # Zähler "Ignorieren": keine Bewertung (kein Zähler, keine Violation)
 
     def to_dict(self) -> dict:
         return {"source": self.source, "target": self.target, "cycle_s": self.cycle_s, "recursive": self.recursive,
                 "group_regex": self.group_regex, "json_name": self.json_name, "png": self.png, "only_hits": self.only_hits, "mode": self.mode, "one_group": self.one_group,
                 "png_size": list(self.png_size), "folders": list(self.folders), "exclude": list(self.exclude),
                 "files": list(self.files), "edge_count": self.edge_count,
-                "edges": [dict(e) for e in self.edges], "edge_target": self.edge_target}
+                "edges": [dict(e) for e in self.edges], "edge_target": self.edge_target,
+                "no_eval": self.no_eval}
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "AutoSettings":
@@ -95,6 +97,7 @@ class AutoSettings:
         s.exclude = tuple(str(x) for x in data.get("exclude") or () if x)
         s.files = tuple(str(x) for x in data.get("files") or () if x)
         s.edge_count = bool(data.get("edge_count", False))
+        s.no_eval = bool(data.get("no_eval", False))
         target = _num(data.get("edge_target"))
         s.edge_target = int(target) if target is not None and target >= 1 else None
         s.edges = tuple(e for e in (normalize_edge(x) for x in data.get("edges") or ()) if e is not None)
@@ -989,7 +992,7 @@ class AutoEngine:
                      limiter.to_dict(limiter_cfg) if limiter_cfg is not None else None, mode,
                      settings.only_hits, settings.png, list(settings.png_size), settings.target,
                      settings.edge_count, [dict(e) for e in settings.edges] if settings.edge_count else None,
-                     settings.edge_target if settings.edge_count else None]
+                     settings.edge_target if settings.edge_count else None, settings.no_eval]
             return json.dumps(parts, sort_keys=True, default=str)
         except Exception:
             return repr(time.time())
@@ -1060,7 +1063,9 @@ class AutoEngine:
             mode = proposal_name
         for group in self.groups.values():
             if group.dirty:
-                if self.settings.edge_count:            # Flanken Counter statt Time Counter
+                if self.settings.no_eval:               # Zähler "Ignorieren": keine Bewertung
+                    group.counters, notes = {}, []
+                elif self.settings.edge_count:          # Flanken Counter statt Time Counter
                     group.counters, notes = evaluate_edges(group.merged, self.settings.edges, group.name, group.labels,
                                                            self.settings.edge_target)
                 else:

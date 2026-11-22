@@ -1,4 +1,4 @@
-#!/home/mfischer/Schreibtisch/MeineTools/MessGraph_20261120/MessGraph/.venv/bin/python3
+#!/home/mfischer/Schreibtisch/MessGraph/MessGraph/.venv/bin/python3
 # -*- coding: utf-8 -*-
 import re
 import sys

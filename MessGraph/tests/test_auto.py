@@ -1042,33 +1042,37 @@ def test_edge_counter_cycle_writes_flanken_counter(folders):
     assert not (dst / "Time_counter.json").exists()
 
 
-def test_gui_edge_counter_choice_window_and_table(env, folders):
+def test_gui_counter_per_mode_time_edge_ignore(env, folders):
+    """Zähler je Mode in Schritt 2 (Zeit, Flanke, Ignorieren), gilt sofort für die gewählten Daten."""
     src, dst = folders
     write_part(src / "D_001.csv", 0, 60, lambda i: 800.0 if (i // 10) % 2 else 700.0)
     app = env.app
     job = manual(app, src, dst)
-    dpg = env.gui.dpg
+    s = env.state.items
+    mode = app._auto_mode_name(job)
+    app.open_auto_modes()
+    row = app.auto_mode_rows[mode]
+    assert s[row[3]]["value"] == "Zeit" and s[row[5]]["show"] is False
     assert app._auto_json_path(job).endswith("Time_counter.json")
-    assert not env.state.items[app.auto_edges_btn]["show"]
-    dpg.set_value(app.auto_counter, "Flanken Counter")
-    app._auto_counter_changed()
-    assert app.auto_settings.edge_count and env.state.items[app.auto_edges_btn]["show"]
-    assert app._auto_json_path(job).endswith("Flanken_counter.json")         # Standardname folgt der Zählerart
-    assert env.state.items[app.auto_table_cols[2]]["label"] == "Signal"
-    assert not app._auto_check()                                              # ohne Flanken kein Start
-    assert "Flanken Counter" in env.state.items[app.status]["value"]
-    app.open_auto_edges_window()
+    # Flanke: Knopf Flanken..., ohne Definition Hinweis und kein Abschluss/Start
+    app._auto_mode_kind(mode, "Flanke")
+    assert job["goal_kind"] == "edges" and s[row[5]]["show"] is True
+    assert s["auto_edges_window"]["show"] is True and mode in s["auto_edges_window"]["label"]
+    assert "Flanken fehlen" in s[row[2]]["value"]
+    assert app._auto_json_path(job).endswith("Flanken_counter.json")
+    assert not app._auto_check() and "Zähler Flanke ohne Flanken bei: " + mode in s[app.status]["value"]
     app.auto_add_edge()
     app._auto_edge_set(0, "upper", "abc")
-    note = app.auto_edge_rows[0][1]
-    assert env.state.items[note]["value"] == "Signal fehlt"
+    assert s[app.auto_edge_rows[0][1]]["value"] == "Signal fehlt"
     app._auto_edge_pick(0, "U_DC")
-    assert "keine Zahl" in env.state.items[app.auto_edge_rows[0][1]]["value"]
+    assert "keine Zahl" in s[app.auto_edge_rows[0][1]]["value"]
     app._auto_edge_set(0, "upper", "750")
     app._auto_edge_set(0, "n", "3")
-    assert env.state.items[app.auto_edge_rows[0][1]]["value"] == ""
-    assert "U_DC (> 750, n = 3)" in env.state.items[app.auto_edges_info]["value"]
-    assert app.settings["auto"]["edges"][0]["signal"] == "U_DC" and app.settings["auto"]["edge_count"]
+    assert s[app.auto_edge_rows[0][1]]["value"] == "" and s[row[2]]["value"] == ""
+    assert "U_DC (> 750, n = 3)" in s[row[4]]["value"]
+    assert app._auto_eval()["mode_edges"][mode][0]["signal"] == "U_DC"
+    settings = app._auto_job_settings(job)
+    assert settings.edge_count and not settings.no_eval and settings.edges[0]["signal"] == "U_DC"
     app.auto_last = None
     app.run_auto_now()
     end = time.time() + 10
@@ -1076,17 +1080,30 @@ def test_gui_edge_counter_choice_window_and_table(env, folders):
         app.tick()
         time.sleep(0.01)
     assert app.auto_last.counters["edges_U_DC_D"]["edges_upper"] == 2       # 3. Ausflug ohne Rückkehr: offen
-    assert (dst / "Flanken_counter.json").exists()
+    assert (dst / "Flanken_counter.json").exists() and not (dst / "Time_counter.json").exists()
     cells = app._auto_cell_values(job, "edges_U_DC_D", app.auto_last.counters["edges_U_DC_D"])
     assert cells[2:5] == ["U_DC", "D", "2 (+1 offen)"]
     assert "über Wert1 = 750: 2 Flanken" in app._edge_tip(app.auto_last.counters["edges_U_DC_D"])
+    # Ignorieren: keine Bewertung, aber verarbeitet (Bilder), kein Zähler, keine Ergebnisdatei-Einträge
+    app._auto_mode_kind(mode, "Ignorieren")
+    assert job["enabled"] and job["goal_kind"] == "ignore"
+    assert s[row[4]]["value"] == "keine Bewertung (kein Zähler, keine Violation)"
+    assert app._auto_job_settings(job).no_eval and app._auto_goal(job) == (None, None)
+    app.auto_last = None
+    app.run_auto_now()
+    end = time.time() + 10
+    while app.auto_last is None and time.time() < end:
+        app.tick()
+        time.sleep(0.01)
+    assert app.auto_last.counters == {}
+    # zurück auf Zeit: Zeit-Datei, Flanken bleiben gespeichert
+    app._auto_mode_kind(mode, "Zeit")
+    assert s[row[5]]["show"] is False and app._auto_json_path(job).endswith("Time_counter.json")
+    assert app._auto_eval()["mode_edges"][mode]
     app._auto_remove_edge(0)
-    assert app._auto_edges() == []
-    dpg.set_value(app.auto_counter, "Time Counter")
-    app._auto_counter_changed()
-    assert app._auto_json_path(job).endswith("Time_counter.json")
-    assert env.state.items[app.auto_table_cols[2]]["label"] == "Mode"
-
+    assert app._auto_edges(mode) == []
+    assert app._edge_json_name("HTOE_time_counter.json") == "HTOE_Flanken_counter.json"
+    assert app._edge_json_name("Ergebnis.json") == "Ergebnis_Flanken.json"
 
 def test_no_goal_means_infinite_no_violation_and_mode_edge_target():
     engine = auto.AutoEngine(auto.AutoSettings())
@@ -1149,11 +1166,12 @@ def test_edge_counter_violation_against_target_edges(folders):
     assert "violation" not in r3.counters["edges_I_D"] and r3.counters["edges_I_D"]["steps"] is None
 
 
-def test_gui_edge_violation_cell_and_tip(env):
+def test_gui_edge_violation_cell_and_tip(env, folders):
     app = env.app
-    app.open_auto_window()
-    app.auto_add_edge("I", upper=11.5)
-    job = {"evaluation": "DV", "name": "X", "target": ""}
+    job = manual(app, *folders)
+    mode = app._auto_mode_name(job)
+    app.auto_add_edge("I", upper=11.5, mode=mode)
+    job.update(evaluation=job["evaluation"])
     entry = {"counter": "edges", "actual": 66, "steps": 200, "fulfillment_percent": 33.0, "upper": 11.5,
              "edges_upper": 66, "n": 1, "violation": True, "edges_to_violation": 88.4, "violation_signal": "U_DC"}
     cells = app._auto_cell_values(job, "edges_I_D", entry)
@@ -1161,3 +1179,4 @@ def test_gui_edge_violation_cell_and_tip(env):
     tip = app._edge_tip(entry)
     assert "Flanken bis Violation: 88 (U_DC)" in tip and "Violation vor Ziel-Flankenzahl!" in tip
     app._auto_fill_table([(job, "edges_I_D", entry)])
+

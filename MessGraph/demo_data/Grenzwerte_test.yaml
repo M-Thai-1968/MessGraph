@@ -1,0 +1,54 @@
+# Grenzwert-Konfiguration (MessGraph-Grenzwert-Konfigurator)
+limits:
+  enabled: true
+  upper: null
+  lower: null
+  modes:
+    Standard:
+      steps: null
+    TestMode:
+      steps: 10m
+      signals:
+        Drehzahl:
+          enabled: true
+          lower: 2.0
+          upper: 2400.0
+        Strom:
+          enabled: true
+          lower: 4.0
+          upper: 40.0
+        Spannung:
+          enabled: true
+          lower: 4.0
+          upper: 450.0
+        Temperatur:
+          enabled: true
+          lower: 4.0
+          upper: 40.0
+        Druck:
+          enabled: true
+          lower: 0.5
+          upper: 5.0
+    Mode:
+      steps: 15h
+      signals:
+        Drehzahl:
+          enabled: true
+          lower: 750.0
+          upper: 2314.0
+        Strom:
+          enabled: true
+          lower: 25.8
+          upper: 39.0
+        Spannung:
+          enabled: true
+          lower: 396.16
+          upper: 400.79
+        Temperatur:
+          enabled: true
+          lower: 24.0
+          upper: 38.8
+        Druck:
+          enabled: true
+          lower: 1.88
+          upper: 2.12

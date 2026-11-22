@@ -2780,7 +2780,10 @@ def test_configurator_suggest_for_all_modes_same_percent(env):
     cfg.modes["Leer"] = limitconfig.new_config("Leer").modes["Leer"]
     for mode in ("Standard", "AC_615V", "DC_800V"):
         cfg.modes[mode].set_entry("HVDC_V", True, None, None)
-    cfg.modes["Standard"].set_entry("LVDC_I", True, 1.0, 2.0)                  # hat Grenzen: bleibt
+    app._le_select_mode("Standard")                                            # von Hand eingetragen: bleibt
+    app._le_edit(None, "1", ("LVDC_I", "lower"))
+    app._le_edit(None, "2", ("LVDC_I", "upper"))
+    cfg.modes["DC_800V"].set_entry("HVDC_V", True, 5.0, 6.0)                   # alter Vorschlag: wird neu berechnet
     cfg.modes["AC_615V"].set_entry("DUT_TS_01", False, None, None)              # inaktiv: bleibt ohne Grenzen
     # Analyse je Mode (Auto, alle Dateien des Modes); DC_800V ohne Analyse -> geladene Dateien
     app.auto_mode_stats = {"AC_615V": {"HVDC_V": ("V", ["a.csv", "b.csv"], 600.0, 630.0),
@@ -2797,6 +2800,7 @@ def test_configurator_suggest_for_all_modes_same_percent(env):
     assert cfg.modes["Standard"].signals["LVDC_I"] == (1.0, 2.0)
     text = env.state.items[app.status]["value"]
     assert "3 Signale in 3 Modes" in text and "(20 %)" in text and cfg.modified
+    assert "1 von Hand eingetragene Grenzen bleiben" in text
     # Einzel-Mode mit demselben Prozentwert
     cfg.modes["AC_615V"].set_entry("HVDC_V", True, None, None)
     app._le_select_mode("Standard")
@@ -2807,6 +2811,15 @@ def test_configurator_suggest_for_all_modes_same_percent(env):
     assert cfg.modes["Standard"].signals["HVDC_V"] == (pytest.approx(lo - 0.2 * span), pytest.approx(hi + 0.2 * span))
     still = cfg.modes["AC_615V"].entries["HVDC_V"]
     assert still.lower is None and still.upper is None                          # nur dieser Mode
+    # Abstand ändern: Vorschläge dieses Modes sofort neu, von Hand eingetragene bleiben
+    env.state.items[app.le_filter]["value"] = ""
+    app._le_rows()
+    env.state.items[app.le_margin]["value"] = 50.0
+    app._le_margin_changed()
+    assert cfg.modes["Standard"].signals["HVDC_V"] == (pytest.approx(lo - 0.5 * span), pytest.approx(hi + 0.5 * span))
+    assert cfg.modes["Standard"].signals["LVDC_I"] == (1.0, 2.0)
+    assert env.state.items[app.le_widgets["HVDC_V"][1]]["value"] == f"{round(lo - 0.5 * span, 6):g}"
+    assert "(50 %)" in env.state.items[app.status]["value"]
     # ohne geladene Dateien und ohne Analyse: Hinweis
     app.datasets.clear()
     app._le_suggest_all()

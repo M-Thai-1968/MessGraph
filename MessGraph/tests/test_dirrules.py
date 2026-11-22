@@ -276,57 +276,6 @@ def test_modes_dropdown_grouped_goal_hhmmss_and_step2(env, tmp_path, monkeypatch
     assert "4 Auswertungen in 2 Modes" in s[app.status]["value"]
 
 
-def test_own_mode_preset_taken_over_when_new_mode_folder_appears(env, tmp_path, monkeypatch):
-    monkeypatch.setattr(env.gui, "AUTO_BASE", tmp_path / "Test")
-    setup = make_halle(tmp_path, modes=("AC_22kW_3ph_615V", "Precon"))
-    app = env.app
-    s = env.state.items
-    open_manager(app, env, "E", setup, tmp_path / "out")
-    assert app.dir_save_rule()
-    app.open_auto_modes()
-    # eigener Mode, den es noch nicht gibt
-    s[app.auto_own_name]["value"] = "AC_22kW_3ph 900V"                        # Leerzeichen -> _
-    s[app.auto_own_goal]["value"] = "12:30:00"
-    app.auto_add_own_mode()
-    assert "wird übernommen, sobald" in s[app.status]["value"]
-    ev = app._auto_eval()
-    assert ev["modes"]["AC_22kW_3ph_900V"] == {"target_time": "12h 30m", "enabled": True,
-                                              "goal_kind": "time", "target_edges": ""}
-    assert "AC_22kW_3ph_900V" in app.auto_mode_rows                             # Zeile "wartet auf Daten"
-    assert any(i.get("kind") in ("tree_node", "add_tree_node") and "noch nicht gefunden (1)" in i.get("label", "")
-               for i in s.values())
-    assert "eigene Modes ohne Daten: AC_22kW_3ph_900V" in s[app.auto_modes_text]["value"]
-    # eigener Mode für einen schon gefundenen Mode: gilt sofort
-    s[app.auto_own_name]["value"] = "Precon"
-    s[app.auto_own_goal]["value"] = "02:00:00"
-    app.auto_add_own_mode()
-    assert {j["target_time"] for j in app._auto_rule_jobs(mode="Precon")} == {"2h"}
-    assert "für 2 vorhandene DUTs übernommen" in s[app.status]["value"]
-    # Quellverzeichnis bekommt den neuen Mode gleicher Struktur
-    for n, dut in enumerate(("DUT1", "DUT2")):
-        folder = setup / dut / "Report" / "AC_22kW_3ph_900V" / "Files"
-        folder.mkdir(parents=True)
-        (folder / f"HTOE_PV_DES20250723011750013{n}_AC_22kW_3ph_900V_{dut}_001.csv").write_text(
-            "Zeit,U [V],I [A]\n2026-06-09 10:00:00,900,1\n2026-06-09 10:00:01,901,2\n")
-    app._auto_resync_rules()
-    jobs = app._auto_rule_jobs(mode="AC_22kW_3ph_900V")
-    assert len(jobs) == 2 and {j["target_time"] for j in jobs} == {"12h 30m"} and all(j["enabled"] for j in jobs)
-    # abgewählter eigener Mode bleibt beim Auftauchen abgewählt; Einstellung bleibt gespeichert
-    app._auto_own_set("AC_22kW_3ph_950V", enabled=False)                       # unbekannt: ignoriert
-    ev["modes"]["DC_950V"] = {"target_time": "1h", "enabled": False}
-    folder = setup / "DUT1" / "Report" / "DC_950V" / "Files"
-    folder.mkdir(parents=True)
-    (folder / "HTOE_PV_DES202507230117500130_DC_950V_DUT1_001.csv").write_text(
-        "Zeit,U [V],I [A]\n2026-06-09 10:00:00,950,1\n2026-06-09 10:00:01,951,2\n")
-    app._auto_resync_rules()
-    job = app._auto_rule_jobs(mode="DC_950V")
-    assert len(job) == 1 and job[0]["enabled"] is False and job[0]["target_time"] == "1h"
-    stored = [e for e in env.app.settings["auto"]["evaluations"] if e["name"] == "E"][0]
-    assert "AC_22kW_3ph_900V" in stored["modes"]
-    app._auto_own_remove("DC_950V")
-    assert "DC_950V" not in ev["modes"]
-
-
 def test_result_file_in_target_directory_with_own_name(env, tmp_path, monkeypatch):
     import json
     import time
@@ -452,19 +401,27 @@ def test_auto_steps_lock_and_unlock(env, tmp_path, monkeypatch):
     open_manager(app, env, "E", setup, tmp_path / "out")
     assert app.dir_save_rule()
     assert app.auto_finish_step(1) is True
-    assert s[app.auto_name]["enabled"] is False and s[app.auto_modes_btn]["enabled"] is True     # 1 gesperrt, 2 frei
+    assert s[app.auto_name]["enabled"] is False                                                  # 1 gesperrt
+    assert s[app.auto_modes_btn].get("enabled", True) is True                                    # Modes: immer offen
     assert s[app.auto_step_state[1]]["value"] == "[erledigt - gesperrt]"
+    assert s[app.auto_step_reset[1]]["show"] is True and s[app.auto_step_reset[2]]["show"] is False
     app._auto_mode_goal("Precon", "02:00:00")
     app.auto_finish_step(2)
-    assert s[app.auto_analyze_btn]["enabled"] is True and s[app.auto_modes_btn]["enabled"] is False
+    assert s[app.auto_analyze_btn]["enabled"] is True and s[app.auto_modes_btn].get("enabled", True) is True
     assert app.auto_finish_step(3) is False                      # noch nicht analysiert
+    app.auto_reset_step(2)                                       # Schritt 2 und folgende zurücksetzen
+    assert app._auto_step() == 2 and s[app.auto_name]["enabled"] is False
+    assert s[app.auto_analyze_btn]["enabled"] is False and "Schritt 2 und folgende" in s[app.status]["value"]
+    app.auto_finish_step(2)
     app.auto_reset_steps()                                       # Zurücksetzen: wieder Schritt 1
     assert app._auto_step() == 1 and s[app.auto_name]["enabled"] is True
     for step in (1, 2):
         app.auto_finish_step(step)
     app.start_auto()                                             # Durchlauf gestartet: alles frei
     assert app._auto_step() == 0 and s[app.auto_name]["enabled"] is True and s[app.auto_analyze_btn]["enabled"] is True
-    app.stop_auto()
+    assert s[app.auto_step_reset[4]]["show"] is True
+    app.auto_reset_step(4)                                       # Schritt 4 zurücksetzen: Zyklus stoppt
+    assert not app.auto_running and app._auto_step() == 4
 
 
 def test_no_duplicates_in_limiter_report_and_jobs(env, tmp_path, monkeypatch):
@@ -635,113 +592,32 @@ def test_report_only_current_evaluation_new_modes_included_no_foreign_folders(en
     assert app._report_selected("DV", app.settings["auto_report"].get("deselected"))  # Zeitplan: ohne Fenster
 
 
-def test_own_mode_goal_kinds_edges_ignore_and_infinite(env, tmp_path, monkeypatch):
+def test_step2_counter_kinds_apply_to_rule_data_and_new_duts(env, tmp_path, monkeypatch):
     monkeypatch.setattr(env.gui, "AUTO_BASE", tmp_path / "Test")
-    setup = make_halle(tmp_path, modes=("AC_22kW_3ph_615V", "Precon"))
-    app = env.app
-    s = env.state.items
-    open_manager(app, env, "E", setup, tmp_path / "out")
-    assert app.dir_save_rule()
-    app.open_auto_modes()
-    # eigener Mode mit Flankenzahl: Hinweis auf Schritt 4 (Flanken Counter noch nicht gewählt)
-    s[app.auto_own_name]["value"] = "DC_950V"
-    s[app.auto_own_kind]["value"] = "Flankenzahl"
-    s[app.auto_own_goal]["value"] = "abc"
-    app.auto_add_own_mode()
-    assert "ganze Zahl ab 1" in s[app.status]["value"] and "DC_950V" not in app._auto_own_modes()
-    s[app.auto_own_goal]["value"] = "25"
-    app.auto_add_own_mode()
-    spec = app._auto_own_modes()["DC_950V"]
-    assert spec == {"goal_kind": "edges", "target_time": "", "target_edges": "25", "enabled": True}
-    assert "Flanken Counter in Schritt 4 wählen" in s[app.status]["value"]
-    assert "Flanken Counter in Schritt 4" in s[app.auto_mode_rows["DC_950V"][4]]["value"]
-    # eigener Mode "Ignorieren": komplett ignoriert (nicht verarbeiten)
-    s[app.auto_own_name]["value"] = "Precon"
-    s[app.auto_own_kind]["value"] = "Ignorieren"
-    s[app.auto_own_goal]["value"] = ""
-    app.auto_add_own_mode()
-    jobs = app._auto_rule_jobs(mode="Precon")
-    assert jobs and not any(j["enabled"] for j in jobs) and {j["goal_kind"] for j in jobs} == {"ignore"}
-    row = app.auto_mode_rows["Precon"]
-    assert s[row[0]]["value"] is False and s[row[3]]["value"] == "Ignorieren"
-    assert s[row[4]]["value"] == "wird komplett ignoriert"
-    assert not any(j in app._auto_ready_jobs() for j in jobs)
-    app._auto_mode_toggle("Precon", True)                         # Häkchen wieder an -> Zielart Zeit
-    assert s[row[3]]["value"] == "Zeit" and all(j["goal_kind"] == "time" for j in jobs)
-    assert s[row[4]]["value"] == "unendlich - keine Violation möglich"
-    # gefundener Mode auf Flankenzahl umstellen, Flanken Counter gewählt -> Hinweis auf die Definition
-    app.auto_settings.edge_count = True
-    app._auto_mode_kind("AC_22kW_3ph_615V", "Flankenzahl")
-    app._auto_mode_goal("AC_22kW_3ph_615V", "0")
-    row = app.auto_mode_rows["AC_22kW_3ph_615V"]
-    assert s[row[2]]["value"] == "ganze Zahl ab 1 erwartet"
-    app._auto_mode_goal("AC_22kW_3ph_615V", "12")
-    ac = app._auto_rule_jobs(mode="AC_22kW_3ph_615V")
-    assert {j["target_edges"] for j in ac} == {"12"} and s[row[2]]["value"] == ""
-    assert "Flanken in Schritt 4 definieren" in s[row[4]]["value"]
-    assert app._auto_job_settings(ac[0]).edge_target == 12
-    assert app._auto_goal(ac[0]) == (None, None)                  # Flankenzahl: keine Zielzeit -> keine Violation
-    assert "12 Flanken" in s[app.auto_modes_text]["value"]
-    # neuer Ordner des eigenen Modes übernimmt die Zielart
-    folder = setup / "DUT1" / "Report" / "DC_950V" / "Files"
-    folder.mkdir(parents=True)
-    (folder / "HTOE_PV_DES202507230117500130_DC_950V_DUT1_001.csv").write_text(
-        "Zeit,U [V],I [A]\n2026-06-09 10:00:00,950,1\n2026-06-09 10:00:01,951,2\n")
-    app._auto_resync_rules()
-    dc = app._auto_rule_jobs(mode="DC_950V")
-    assert dc and dc[0]["goal_kind"] == "edges" and dc[0]["target_edges"] == "25" and dc[0]["enabled"]
-    # Schritt 2 ohne Zielzeit ist erlaubt: unendlich
-    assert app.auto_finish_step(2) is True
-    assert "Ohne Zielvorgabe (unendlich, keine Violation): Precon" in s[app.status]["value"]
-    # Zielzeit leer -> beim Zyklus keine Zielzeit im Mode (auch wenn die Konfiguration eine hat)
-    from messgraph import auto as auto_mod
-    app.limit_cfg = auto_mod.AutoEngine.propose_from_stats({"U": {"values": [1.0, 2.0]}}, "Precon", "24h")
-    auto_mode = app.limit_cfg.modes["Precon"]
-    assert auto_mode.target == ("s", 86400.0)
-    captured = {}
-    app.auto_pool = type("P", (), {"submit": lambda self, fn, tasks, *a: captured.setdefault("tasks", tasks)})()
-    app._auto_submit(jobs=[jobs[0]])
-    config = captured["tasks"][0][2]
-    assert config.modes["Precon"].target is None
-
-
-def test_only_own_mode_waiting_for_data_passes_steps_and_starts(env, tmp_path, monkeypatch):
-    import time
-    monkeypatch.setattr(env.gui, "AUTO_BASE", tmp_path / "Test")
-    setup = make_halle(tmp_path, duts=("DUT1",), modes=("Mode",))
+    setup = make_halle(tmp_path, duts=("DUT1",), modes=("AC_22kW_3ph_615V", "Precon"))
     app = env.app
     s = env.state.items
     open_manager(app, env, "E", setup, tmp_path / "out")
     assert app.dir_save_rule()
     assert app.auto_finish_step(1) is True
     app.open_auto_modes()
-    app._auto_mode_kind("Mode", "Ignorieren")                     # gefundener Mode ignoriert
-    s[app.auto_own_name]["value"] = "Mode1"                       # eigener Mode ohne Daten, Zeit leer
-    s[app.auto_own_kind]["value"] = "Zeit"
-    s[app.auto_own_goal]["value"] = ""
-    app.auto_add_own_mode()
-    assert app._auto_waiting_modes() == ["Mode1"]
-    assert app.auto_finish_step(2) is True                        # kein Fehler mehr
-    assert "Eigene Modes warten auf Daten: Mode1" in s[app.status]["value"]
-    app.analyze_auto_source()
-    assert "eigene Modes warten auf Daten (Mode1)" in s[app.status]["value"]
-    assert app.auto_finish_step(3) is True
-    assert "Noch ohne Grenzen (Vorschlag beim ersten Zyklus): Mode1" in s[app.status]["value"]
-    app.start_auto()
-    assert app.auto_running and "warten auf Daten: Mode1" in s[app.status]["value"]
-    # der Ordner taucht auf: der nächste Zyklus übernimmt ihn
-    folder = setup / "DUT1" / "Report" / "Mode1" / "Files"
+    assert not any(i.get("label") == "Eigener Mode" for i in s.values())       # keine eigenen Modes mehr
+    app._auto_mode_kind("Precon", "Flanke")
+    app._auto_mode_goal("Precon", "25")
+    app._auto_mode_kind("AC_22kW_3ph_615V", "Ignorieren")
+    assert app.auto_finish_step(2) is False and "Zähler Flanke ohne Flanken bei: Precon" in s[app.status]["value"]
+    app.auto_add_edge("U", upper=1.5, mode="Precon")
+    assert app.auto_finish_step(2) is True and "Ohne Bewertung: AC_22kW_3ph_615V" in s[app.status]["value"]
+    assert "Precon: 25 Flanken" in s[app.auto_modes_text]["value"]
+    # nach Abschluss jederzeit änderbar: gilt sofort für die gewählten Daten
+    app._auto_mode_kind("AC_22kW_3ph_615V", "Zeit")
+    assert {j["goal_kind"] for j in app._auto_rule_jobs(mode="AC_22kW_3ph_615V")} == {"time"}
+    # neuer DUT der Regel übernimmt Zähler und Ziel seines Modes
+    folder = setup / "DUT2" / "Report" / "Precon" / "Files"
     folder.mkdir(parents=True)
-    (folder / "HTOE_PV_DES202507230117500130_Mode1_DUT1_001.csv").write_text(
-        "Zeit,U [V],I [A]\n2026-06-09 10:00:00,900,1\n2026-06-09 10:00:01,901,2\n2026-06-09 10:00:02,902,3\n")
-    app.auto_last = None
-    app.run_auto_now()
-    end = time.time() + 10
-    while app.auto_last is None and time.time() < end:
-        app.tick()
-        time.sleep(0.01)
-    jobs = app._auto_rule_jobs(mode="Mode1")
-    assert len(jobs) == 1 and jobs[0]["enabled"] and app.auto_last is not None
-    assert any(k.startswith("count_Mode1") for k in app.auto_last.counters)
-    assert not any(j["enabled"] for j in app._auto_rule_jobs(mode="Mode"))
-    app.stop_auto()
+    (folder / "HTOE_PV_DES202507230117500131_Precon_DUT2_001.csv").write_text(
+        "Zeit,U [V],I [A]\n2026-06-09 10:00:00,1,1\n2026-06-09 10:00:01,2,2\n")
+    app._auto_resync_rules()
+    jobs = app._auto_rule_jobs(mode="Precon")
+    assert len(jobs) == 2 and {j["goal_kind"] for j in jobs} == {"edges"} and {j["target_edges"] for j in jobs} == {"25"}
+    assert app._auto_job_settings(jobs[-1]).edge_target == 25
