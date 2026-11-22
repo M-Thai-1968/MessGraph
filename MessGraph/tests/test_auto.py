@@ -1086,3 +1086,78 @@ def test_gui_edge_counter_choice_window_and_table(env, folders):
     app._auto_counter_changed()
     assert app._auto_json_path(job).endswith("Time_counter.json")
     assert env.state.items[app.auto_table_cols[2]]["label"] == "Mode"
+
+
+def test_no_goal_means_infinite_no_violation_and_mode_edge_target():
+    engine = auto.AutoEngine(auto.AutoSettings())
+    cfg = auto.AutoEngine.propose_from_stats({"U": {"values": np.linspace(700, 760, 50)}}, "M", "")
+    mode = cfg.modes["M"]
+    assert mode.target is None                                     # leer = keine Zielzeit
+    assert mode.lookup("U") is not None and mode.lookup("U")[1] < 800
+    x = np.arange(100, dtype=float)
+    y = np.linspace(700, 800, 100)                                  # Grenze schon überschritten
+    a = engine.assess(x, y, mode, "U")
+    assert a["state"] == "reached" and a["violated"] is False       # Grenze erreicht, aber keine Violation
+    lines = [text for text, _c, _b in engine._info_lines("U", a, "V")]
+    assert "Zielzeit: unendlich (keine Violation möglich)" in lines and "Violation vor Zielzeit!" not in lines
+    # Flankenzahl des Modes gilt für Flanken ohne eigenes Ziel
+    sig = {"U": (x, np.where((np.arange(100) // 10) % 2, 10.0, 0.0))}
+    out, _ = auto.evaluate_edges(sig, [{"signal": "U", "upper": 5, "n": 3}], "G", default_target=8)
+    assert out["edges_U_G"]["actual"] == 4 and out["edges_U_G"]["steps"] == 8   # letzte offen
+    assert out["edges_U_G"]["fulfillment_percent"] == 50.0
+    out, _ = auto.evaluate_edges(sig, [{"signal": "U", "upper": 5, "n": 3, "target": 2}], "G", default_target=8)
+    assert out["edges_U_G"]["steps"] == 2                          # eigenes Ziel der Flanke geht vor
+    out, _ = auto.evaluate_edges(sig, [{"signal": "U", "upper": 5}], "G")
+    assert out["edges_U_G"]["steps"] is None and out["edges_U_G"]["fulfillment_percent"] is None
+    s = auto.AutoSettings.from_dict({"edge_target": "12"})
+    assert s.edge_target == 12 and auto.AutoSettings.from_dict(s.to_dict()).edge_target == 12
+    assert auto.AutoSettings.from_dict({"edge_target": "0"}).edge_target is None
+
+
+def test_edge_counter_violation_against_target_edges(folders):
+    src, dst = folders
+    write_part(src / "D_001.csv", 0, 200, lambda i: 710.0 + 0.15 * i)     # U_DC steigt Richtung Grenze 750
+    config = config_yaml(src.parent / "g.yaml")
+
+    def run(target, folder):
+        settings = auto.AutoSettings(source=str(src), target=str(folder), one_group=False, edge_count=True,
+                                     edges=({"signal": "I", "upper": 11.5, "n": 1},), edge_target=target)
+        engine = auto.AutoEngine(settings)
+        return engine, engine.run_cycle(config, mode="Precon")
+
+    # I = 10, 11, 12, ...: eine Flanke je 3 s; U_DC erreicht 750 in ~67 s -> ~22 weitere Flanken bis Violation
+    engine, r = run(200, dst)
+    entry = r.counters["edges_I_D"]
+    assert entry["actual"] == 66 and entry["duration_s"] == pytest.approx(199.0)
+    assert entry["violation"] is True and entry["violation_signal"] == "U_DC"
+    assert 85 <= entry["edges_to_violation"] <= 92
+    stats = json.loads((dst / "D" / "statistics.json").read_text())
+    goal = stats["signals"]["U_DC"]["edge_goals"][0]
+    assert goal["violated"] and goal["target"] == 200 and stats["signals"]["U_DC"]["violated"]
+    a = engine.assess(*engine.groups[next(iter(engine.groups))].merged["U_DC"], config.modes["Precon"], "U_DC",
+                      auto.edge_goals(r.counters))
+    lines = [text for text, _c, _b in engine._info_lines("U_DC", a, "V")]
+    assert "Ziel: 200 Flanken (I, gezählt 66)" in lines and "Violation vor Ziel-Flankenzahl!" in lines
+    assert any(x.startswith("Flanken bis Violation: 8") for x in lines)
+    # Ziel 80 wird vor der Grenzverletzung erreicht -> keine Violation
+    _engine, r2 = run(80, dst.parent / "aus2")
+    e2 = r2.counters["edges_I_D"]
+    assert e2["violation"] is False and e2["steps"] == 80
+    assert not json.loads((dst.parent / "aus2" / "D" / "statistics.json").read_text())["signals"]["U_DC"]["violated"]
+    # ohne Flankenziel: keine Violation (unendlich)
+    _engine, r3 = run(None, dst.parent / "aus3")
+    assert "violation" not in r3.counters["edges_I_D"] and r3.counters["edges_I_D"]["steps"] is None
+
+
+def test_gui_edge_violation_cell_and_tip(env):
+    app = env.app
+    app.open_auto_window()
+    app.auto_add_edge("I", upper=11.5)
+    job = {"evaluation": "DV", "name": "X", "target": ""}
+    entry = {"counter": "edges", "actual": 66, "steps": 200, "fulfillment_percent": 33.0, "upper": 11.5,
+             "edges_upper": 66, "n": 1, "violation": True, "edges_to_violation": 88.4, "violation_signal": "U_DC"}
+    cells = app._auto_cell_values(job, "edges_I_D", entry)
+    assert cells[2:] == ["I", "D", "66", "200", "33.0 % - Violation"]
+    tip = app._edge_tip(entry)
+    assert "Flanken bis Violation: 88 (U_DC)" in tip and "Violation vor Ziel-Flankenzahl!" in tip
+    app._auto_fill_table([(job, "edges_I_D", entry)])

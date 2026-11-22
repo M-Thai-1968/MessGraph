@@ -67,13 +67,14 @@ class AutoSettings:
     files: tuple = ()                   # nur diese Dateien lesen (Mode aus Dateinamen: ein Ordner, mehrere Ziele)
     edge_count: bool = False            # Flanken Counter statt Time Counter
     edges: tuple = ()                   # Flankendefinitionen: {"signal", "upper" (Wert1), "lower" (Wert2), "n", "target"}
+    edge_target: int | None = None      # Flankenzahl des Modes (Schritt 2), gilt für Flanken ohne eigenes Ziel
 
     def to_dict(self) -> dict:
         return {"source": self.source, "target": self.target, "cycle_s": self.cycle_s, "recursive": self.recursive,
                 "group_regex": self.group_regex, "json_name": self.json_name, "png": self.png, "only_hits": self.only_hits, "mode": self.mode, "one_group": self.one_group,
                 "png_size": list(self.png_size), "folders": list(self.folders), "exclude": list(self.exclude),
                 "files": list(self.files), "edge_count": self.edge_count,
-                "edges": [dict(e) for e in self.edges]}
+                "edges": [dict(e) for e in self.edges], "edge_target": self.edge_target}
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "AutoSettings":
@@ -94,6 +95,8 @@ class AutoSettings:
         s.exclude = tuple(str(x) for x in data.get("exclude") or () if x)
         s.files = tuple(str(x) for x in data.get("files") or () if x)
         s.edge_count = bool(data.get("edge_count", False))
+        target = _num(data.get("edge_target"))
+        s.edge_target = int(target) if target is not None and target >= 1 else None
         s.edges = tuple(e for e in (normalize_edge(x) for x in data.get("edges") or ()) if e is not None)
         size = data.get("png_size")
         if isinstance(size, (list, tuple)) and len(size) == 2:
@@ -206,6 +209,28 @@ def count_edges(y: np.ndarray, level: float, n: int, above: bool = True) -> tupl
     return count, bool(current and armed)
 
 
+def edge_goals(counters: dict) -> list:
+    """Flanken-Einträge einer Gruppe mit Ziel (Flankenzahl): Grundlage der Violation im Flanken Counter."""
+    return [{"key": k, "signal": e.get("signal", ""), "actual": int(e.get("actual") or 0), "target": e["steps"],
+             "duration_s": float(e.get("duration_s") or 0.0)}
+            for k, e in (counters or {}).items() if e.get("counter") == "edges" and e.get("steps")]
+
+
+def edge_violation(goal: dict, state: str, remaining: float | None) -> dict:
+    """Violation im Flanken Counter: Wie viele Flanken sind bis zur Grenzverletzung zu erwarten (gezählte Flanken +
+    Flankenrate * Zeit bis Violation)? Weniger als die Ziel-Flankenzahl = Violation. Grenze schon erreicht: gezählte
+    Flanken gegen das Ziel. Trend läuft auf keine Grenze zu: unendlich viele, keine Violation."""
+    actual, target = goal["actual"], goal["target"]
+    rate = actual / goal["duration_s"] if goal.get("duration_s") else 0.0
+    if state == "reached":
+        at = float(actual)
+    elif state in ("max", "min") and remaining is not None:
+        at = actual + rate * float(remaining)
+    else:
+        at = None
+    return dict(goal, rate_per_s=rate, at_violation=at, violated=at is not None and at < target)
+
+
 def find_signal(signals: dict, name: str, labels: dict | None = None) -> str | None:
     """Signal zu einem Namen: genau, ohne Groß-/Kleinschreibung, ohne Einheit [..] oder über den Anzeigenamen."""
     if name in signals:
@@ -220,8 +245,10 @@ def find_signal(signals: dict, name: str, labels: dict | None = None) -> str | N
     return None
 
 
-def evaluate_edges(signals: dict, edges, group: str, labels: dict | None = None) -> tuple[dict, list]:
-    """Flanken Counter: je Flankendefinition ein Eintrag edges_<Signal>_<Gruppe> über alle Daten der Gruppe."""
+def evaluate_edges(signals: dict, edges, group: str, labels: dict | None = None,
+                   default_target: int | None = None) -> tuple[dict, list]:
+    """Flanken Counter: je Flankendefinition ein Eintrag edges_<Signal>_<Gruppe> über alle Daten der Gruppe. Ziel:
+    das der Flanke, sonst die Flankenzahl des Modes (default_target), sonst keins (unendlich)."""
     out, notes = {}, []
     for edge in edges or ():
         edge = normalize_edge(edge)
@@ -232,15 +259,20 @@ def evaluate_edges(signals: dict, edges, group: str, labels: dict | None = None)
             notes.append(t("{name}: Signal {signal} für den Flanken Counter nicht gefunden.", name=group,
                            signal=edge["signal"]))
             continue
-        y = signals[name][1]
+        x, y = signals[name]
+        dt = np.diff(np.asarray(x, dtype=np.float64)[np.isfinite(y)])
+        dt = dt[np.isfinite(dt) & (dt > 0)]
+        if dt.size:
+            dt = np.minimum(dt, 5 * float(np.median(dt)))  # Lücken zwischen Dateien nicht mitzählen
+        duration = float(dt.sum()) if dt.size else 0.0
         up, up_open = count_edges(y, edge["upper"], edge["n"], True) if edge["upper"] is not None else (0, False)
         down, down_open = count_edges(y, edge["lower"], edge["n"], False) if edge["lower"] is not None else (0, False)
         total = up + down
-        steps = edge["target"]
+        steps = edge["target"] or default_target
         out[f"edges_{edge['signal']}_{group}"] = {
             "counter": "edges", "signal": name, "actual": total, "actual_count": total, "edges_upper": up,
             "edges_lower": down, "upper": edge["upper"], "lower": edge["lower"], "n": edge["n"],
-            "pending": bool(up_open or down_open), "steps": steps,
+            "pending": bool(up_open or down_open), "steps": steps, "duration_s": round(duration, 3),
             "fulfillment_percent": round(100.0 * total / steps, 1) if steps else None}
     return out, notes
 
@@ -686,7 +718,7 @@ class AutoEngine:
         return AutoEngine.propose_from_stats({n: {"values": y} for n, (_x, y) in signals.items()}, name, target)
 
     # ---------------------------------------------------------------- Bilder
-    def assess(self, x: np.ndarray, y: np.ndarray, mode, name: str) -> dict:
+    def assess(self, x: np.ndarray, y: np.ndarray, mode, name: str, edge_goals=None) -> dict:
         """Bewertung eines Signals wie in der Wertanzeige: Grenzen und Zielzeit aus dem Mode, Regressionsgerade
         (gewählte Art), Zeit bis zur Grenzverletzung ab dem letzten Messpunkt, verletzt = früher als die Zielzeit."""
         out = {"lo": None, "hi": None, "m": NAN, "b": NAN, "x0": float(x[0]) if x.size else 0.0, "target": None,
@@ -705,6 +737,7 @@ class AutoEngine:
         if not ok.size or (out["lo"] is None and out["hi"] is None):
             return out
         p = predict(m, float(y[ok[-1]]), out["lo"], out["hi"])
+        out["edge_goals"] = []
         dt = np.diff(x[np.isfinite(x)])
         step = float(np.median(dt)) if dt.size else NAN
         if p.kind == "reached":
@@ -718,6 +751,9 @@ class AutoEngine:
                 out["violated"] = value is not None and value < target[1]
         else:
             out["state"] = p.kind                       # inside: Trend läuft nicht auf eine Grenze zu
+        if edge_goals:                                  # Flanken Counter: Violation gegen die Ziel-Flankenzahl
+            out["edge_goals"] = [edge_violation(goal, out["state"], out["remaining"]) for goal in edge_goals]
+            out["violated"] = any(g["violated"] for g in out["edge_goals"])
         return out
 
     @staticmethod
@@ -747,8 +783,13 @@ class AutoEngine:
                  (f"f(x) = {num(a['m'])} * x + {num(b_rel)}", None, False),
                  (t("x: Sekunden ab {start}", start=format_wallclock(a["x0"])[:19]), None, False), ("", None, False)]
         target = a["target"]
-        if target is None:
-            lines.append((t("Zielzeit: -"), None, False))
+        goals = a.get("edge_goals") or []
+        if goals:
+            for g in goals:
+                lines.append((t("Ziel: {target} Flanken ({signal}, gezählt {actual})", target=g["target"],
+                                signal=g["signal"], actual=g["actual"]), None, False))
+        elif target is None:
+            lines.append((t("Zielzeit: unendlich (keine Violation möglich)"), None, False))
         elif target[0] == "steps":
             lines.append((t("Zielzeit: {steps} Schritte", steps=f"{target[1]:g}"), None, False))
         else:
@@ -762,9 +803,18 @@ class AutoEngine:
             if a["remaining_steps"] is not None and target is not None and target[0] == "steps":
                 violation += t(" ({steps} Schritte)", steps=f"{a['remaining_steps']:.0f}")
         lines.append((t("Zeit bis Violation: {time}", time=violation), None, False))
+        for g in goals:
+            at = g["at_violation"]
+            lines.append((t("Flanken bis Violation: {count}", count=t("unendlich") if at is None else f"{at:.0f}"),
+                          None, False))
         if a.get("peak"):
             lines.append((t("Peaks außerhalb der Grenzen!"), (150, 110, 0), True))
-        if a["violated"]:
+        if goals:
+            if a["violated"]:
+                lines.append((t("Violation vor Ziel-Flankenzahl!"), LIMIT_RGB, True))
+            elif a["state"] != "none":
+                lines.append((t("Keine Violation vor Ziel-Flankenzahl (OK)"), (20, 125, 70), True))
+        elif a["violated"]:
             lines.append((t("Violation vor Zielzeit!"), LIMIT_RGB, True))
         elif target is not None and a["state"] != "none":
             lines.append((t("Keine Violation vor Zielzeit (OK)"), (20, 125, 70), True))
@@ -780,7 +830,7 @@ class AutoEngine:
         mode = None
         if config is not None and config.modes:
             mode = config.modes.get(mode_name) if mode_name in config.modes else next(iter(config.modes.values()))
-        a = self.assess(x, y, mode, name)
+        a = self.assess(x, y, mode, name, self._edge_goals(group))
         limits, extra = [], []
         for value in (a["hi"], a["lo"]):
             if value is not None:
@@ -814,6 +864,9 @@ class AutoEngine:
         path.write_text(canvas.to_svg(), encoding="utf-8")
         return str(path)
 
+    def _edge_goals(self, group: Group) -> list:
+        return edge_goals(group.counters) if self.settings.edge_count else []
+
     # ---------------------------------------------------------------- Statistik für den Report
     STATS_NAME = "statistics.json"
 
@@ -824,11 +877,24 @@ class AutoEngine:
         if config is not None and config.modes:
             mode = config.modes.get(mode_name) if mode_name in config.modes else next(iter(config.modes.values()))
         signals = {}
+        goals = self._edge_goals(group)
+        for g in goals:                                   # neu bewerten
+            entry = group.counters.get(g["key"], {})
+            entry.update(violation=False, edges_to_violation=None, violation_signal=None)
         for name, (x, y) in (group.merged or {}).items():
             finite = y[np.isfinite(y)]
             label = group.labels.get(name, name)
-            a = self.assess(x, y, mode, name) if finite.size else {"lo": None, "hi": None, "violated": False,
-                                                                    "remaining": None, "m": NAN}
+            a = self.assess(x, y, mode, name, goals) if finite.size else {"lo": None, "hi": None, "violated": False,
+                                                                           "remaining": None, "m": NAN}
+            for g in a.get("edge_goals") or []:          # Ergebnis je Flanken-Eintrag: frühste Violation
+                entry = group.counters.get(g["key"])
+                if entry is None:
+                    continue
+                at = g["at_violation"]
+                if at is not None and (entry.get("edges_to_violation") is None or at < entry["edges_to_violation"]):
+                    entry["edges_to_violation"] = round(at, 1)
+                    entry["violation_signal"] = name
+                entry["violation"] = bool(entry.get("violation")) or g["violated"]
             mean = float(finite.mean()) if finite.size else None
             inside = None
             if mean is not None and (a["lo"] is not None or a["hi"] is not None):
@@ -839,7 +905,9 @@ class AutoEngine:
                              "std": float(finite.std()) if finite.size else None,
                              "count": int(finite.size), "lo": a["lo"], "hi": a["hi"], "mean_inside": inside,
                              "violated": bool(a["violated"]), "peak_violated": bool(a.get("peak")),
-                             "remaining_s": a["remaining"] if a.get("remaining") is not None else None}
+                             "remaining_s": a["remaining"] if a.get("remaining") is not None else None,
+                             "edge_goals": [{k: g[k] for k in ("signal", "actual", "target", "at_violation",
+                                                                "violated")} for g in a.get("edge_goals") or []]}
         data = {"group": group.name, "source": self.settings.source, "mode": mode.name if mode else None,
                 "files": sorted(Path(p).name for p in group.files), "updated": datetime.now().isoformat(timespec="seconds"),
                 "signals": signals}
@@ -920,7 +988,8 @@ class AutoEngine:
             parts = [limitconfig.to_dict(config) if config is not None else None,
                      limiter.to_dict(limiter_cfg) if limiter_cfg is not None else None, mode,
                      settings.only_hits, settings.png, list(settings.png_size), settings.target,
-                     settings.edge_count, [dict(e) for e in settings.edges] if settings.edge_count else None]
+                     settings.edge_count, [dict(e) for e in settings.edges] if settings.edge_count else None,
+                     settings.edge_target if settings.edge_count else None]
             return json.dumps(parts, sort_keys=True, default=str)
         except Exception:
             return repr(time.time())
@@ -992,7 +1061,8 @@ class AutoEngine:
         for group in self.groups.values():
             if group.dirty:
                 if self.settings.edge_count:            # Flanken Counter statt Time Counter
-                    group.counters, notes = evaluate_edges(group.merged, self.settings.edges, group.name, group.labels)
+                    group.counters, notes = evaluate_edges(group.merged, self.settings.edges, group.name, group.labels,
+                                                           self.settings.edge_target)
                 else:
                     group.counters, notes = self.evaluate(group.merged, use, group.name, self.settings.only_hits, mode)
                 result.notes += notes

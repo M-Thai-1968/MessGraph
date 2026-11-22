@@ -88,7 +88,7 @@ Programmlogik ohne Bildschirm läuft. Das ersetzt keinen Test mit dem echten Pak
 
 ## Prüfstand
 
-Die Versionen 1.0.0 bis 1.72.0 wurden ohne die Pakete `dearpygui`, `asammdf` und `pyarrow` entwickelt.
+Die Versionen 1.0.0 bis 1.74.1 wurden ohne die Pakete `dearpygui`, `asammdf` und `pyarrow` entwickelt.
 Mit echten Daten geprüft sind die CSV-Erkennung und die Messrechnung. Die Oberfläche sowie die
 Parquet- und MF4-Leser liefen nur gegen Nachbildungen und sind beim ersten echten Start zu prüfen.
 
@@ -272,6 +272,37 @@ Die Wahl gilt für Drift (Regression), Prognose, Zielzeit-Bewertung, Regressions
 Dazu im Menü ein Schalter für die Regressionslinien.
 Ab 1.47.1 sind die Arten im Menü nummeriert ((1) bis (4)); die Nummer steht im Spaltenkopf der Wertanzeige
 ("Drift (Regression 3)"), im Detailfenster und in der Signaltabelle des Reports und wechselt beim Umschalten sofort.
+
+## Eigene Modes ohne Daten reichen für Schritt 2-4 (1.74.1)
+
+- Fehler "Schritt 2: mindestens einen Mode zum Verarbeiten anhaken", obwohl ein eigener Mode (wartet auf Daten)
+  angehakt war: Schritt 2 zählte nur gefundene Modes. Jetzt zählen eigene Modes mit (`_auto_waiting_modes`).
+- Schritt 3 ohne Grenzwert-Konfiguration abschließbar, wenn nur eigene Modes warten (Grenzen beim ersten Zyklus);
+  Analysieren meldet das statt eines Fehlers. Start ohne aktive Teile erlaubt: jeder Zyklus sucht die Ordner neu.
+- Zielart im Eingabefeld "Eigener Mode" springt nach Hinzufügen auf Zeit zurück.
+
+## Violation gegen die Ziel-Flankenzahl (1.74.0)
+
+- Flanken Counter mit Ziel (Flanke in Schritt 4 oder `edge_target` des Modes): `auto.edge_goals(counters)` liefert
+  je Eintrag gezählt/Ziel/Messzeit (`duration_s`, Lücken > 5 * Median nicht gezählt).
+- `assess(..., edge_goals)` -> `edge_violation`: Flanken bis Violation = gezählt + Rate * Zeit bis Violation
+  (Trend). Weniger als Ziel = Violation (roter Hintergrund, "Violation vor Ziel-Flankenzahl!"); Grenze erreicht ->
+  gezählt gegen Ziel; Trend ohne Grenze -> unendlich. Ohne Flankenziel keine Violation.
+- `write_statistics` schreibt je Signal `edge_goals` und je Flanken-Eintrag `violation`, `edges_to_violation`
+  (frühstes Signal), `violation_signal` in die Ergebnisdatei. Tabelle: "Erfüllung - Violation", Tooltip.
+
+## Zielvorgabe je Mode: Zeit, Flankenzahl, Ignorieren (1.73.0)
+
+- Schritt 2 (Modes und Zielzeiten), gefundene und eigene Modes: Zielart `goal_kind` = time | edges | ignore,
+  dazu `target_time` bzw. `target_edges` (am Teil/DUT und am eigenen Mode gespeichert, beim Auftauchen eines Ordners
+  übernommen; ältere Einstellungen ohne Zielart = time).
+- Ignorieren = enabled aus (komplett ignoriert); Häkchen setzen stellt auf Zeit zurück.
+- Flankenzahl: `AutoSettings.edge_target` je Auswertung; `evaluate_edges(..., default_target)` nimmt es für Flanken
+  ohne eigenes Ziel. Hinweis in der Zeile/Meldung, solange Schritt 4 nicht Flanken Counter ist oder keine Flanke
+  definiert ist. Keine Zielzeit -> keine Violation.
+- Leer = unendlich: `_auto_goal` -> (None, None), der Mode bekommt beim Zyklus keine Zielzeit (auch nicht die der
+  Konfiguration); `assess` meldet dann keine Violation, Textblock "Zielzeit: unendlich (keine Violation möglich)".
+  Schritt 2 ist ohne Zielzeit abschließbar; Vorschläge aus Daten ohne Zielzeit statt 24h.
 
 ## Flanken Counter (1.72.0)
 
